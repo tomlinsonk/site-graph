@@ -13,3 +13,5 @@ To generate the example above (my website), just run:
 ```python3 site_graph.py https://www.cs.cornell.edu/~kt/```
 To see more options, run:
 ```python3 site_graph.py -h```
+
+Blue nodes are internal pages, red nodes are external pages, and yellow nodes are pages with errors.  
