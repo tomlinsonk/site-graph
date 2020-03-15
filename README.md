@@ -7,6 +7,7 @@ python3
 - bs4
 - pyvis
 - networkx
+- requests
 
 ## Running
 To generate the example above (my website), just run:
@@ -14,4 +15,4 @@ To generate the example above (my website), just run:
 To see more options, run:
 ```python3 site_graph.py -h```
 
-Blue nodes are internal pages, red nodes are external pages, and yellow nodes are pages with errors.  
+Blue nodes are internal pages, green nodes are internal resource files (anything that isn't HTML), red nodes are external pages, and yellow nodes are pages with errors. Hover over nodes to see URLs and specific errors (e.g. 404, 500, timeout).  

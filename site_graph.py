@@ -4,6 +4,7 @@ import requests
 from pyvis.network import Network
 import networkx as nx
 import argparse
+import pickle
 
 from queue import Queue
 
@@ -125,29 +126,45 @@ def visualize(edges, error_codes, resouce_pages, args):
         else:
             node['title'] = f'<a href="{node["title"]}">{node["title"]}</a>'
 
-    net.save_graph(args.out_file)
+    net.save_graph(args.vis_file)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Visualize the link graph of a website.')
-    parser.add_argument('site_url', type=str, help='the base URL of the website')
-    parser.add_argument('--out-file', type=str, help='filename in which to save HTML graph visualization (default: site.html)', default='site.html')
+    parser.add_argument('site_url', type=str, help='the base URL of the website', nargs='?', default='')
+    parser.add_argument('--vis-file', type=str, help='filename in which to save HTML graph visualization (default: site.html)', default='site.html')
+    parser.add_argument('--data-file', type=str, help='filename in which to save crawled graph data (default: edges.pickle)', default='crawl.pickle')
     parser.add_argument('--width', type=int, help='width of graph visualization in pixels (default: 800)', default=1000)
     parser.add_argument('--height', type=int, help='height of graph visualization in pixels (default: 800)', default=800)
     parser.add_argument('--visit-external', action='store_true', help='detect broken external links (slower)')
     parser.add_argument('--show-buttons', action='store_true', help='show visualization settings UI')
     parser.add_argument('--options', type=str, help='file with drawing options (use --show-buttons to configure, then generate options)')
+    parser.add_argument('--from-data-file', type=str, help='create visualization from given data file', default=None)
+    parser.add_argument('--force', action='store_true', help='override warnings about base URL')
 
     args = parser.parse_args()
 
-    if not args.site_url.endswith('/'):
-        print('Warning: no trailing slash on site_url (may get duplicate homepage node)')
+    if args.from_data_file is None:
+        if not args.site_url.endswith('/'):
+            print('Warning: no trailing slash on site_url (may get duplicate homepage node). If you really don\'t want the trailing slash, run with --force')
+            if not args.force:
+                exit(1)
 
-    if not args.site_url.startswith('https'):
-        print('Warning: not using https')
+        if not args.site_url.startswith('https'):
+            print('Warning: not using https. If you really want to use http, run with --force')
+            if not args.force:
+                exit(1)
 
-    edges, error_codes, resouce_pages = crawl(args.site_url, args.visit_external)
-    print('Crawl complete.')
+        edges, error_codes, resource_pages = crawl(args.site_url, args.visit_external)
+        print('Crawl complete.')
 
-    visualize(edges, error_codes, resouce_pages, args)
-    print('Saved graph to', args.out_file)
+        with open(args.data_file, 'wb') as f:
+            pickle.dump((edges, error_codes, resource_pages, args.site_url), f)
+            print(f'Saved crawl data to {args.data_file}')
+    else:
+        with open(args.data_file, 'rb') as f:
+            edges, error_codes, resource_pages, site_url = pickle.load(f)
+            args.site_url = site_url
+
+    visualize(edges, error_codes, resource_pages, args)
+    print('Saved graph to', args.vis_file)
