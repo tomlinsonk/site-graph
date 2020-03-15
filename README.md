@@ -10,7 +10,7 @@ python3
 - requests
 
 ## Running
-To generate the example above (my website), just run:
+Replacing my URL with yours, run:
 ```python3 site_graph.py https://www.cs.cornell.edu/~kt/```
 To see more options, run:
 ```python3 site_graph.py -h```
