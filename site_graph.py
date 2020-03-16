@@ -6,7 +6,7 @@ import networkx as nx
 import argparse
 import pickle
 
-from queue import Queue
+from collections import deque
 
 INTERNAL_COLOR = '#0072BB'
 EXTERNAL_COLOR = '#F45B69'
@@ -14,62 +14,52 @@ ERROR_COLOR = '#FFE74C'
 RESOURCE_COLOR = '#2ECC71'
 
 
+def handle_error(error, error_obj, r, url, visited, error_codes):
+    error = str(error_obj) if error else r.status_code
+    visited.add(url)
+    error_codes[url] = error
+    print(f'{error} ERROR while visitng {url}')
+
+
 def crawl(url, visit_external):
     visited = set()
     edges = set()
     resouce_pages = set()
     error_codes = dict()
+    canonical_urls = dict() 
 
-    to_visit = Queue()
-    to_visit.put((url, None))
+    head = requests.head(url, timeout=10)
+    site_url = head.url
+    canonical_urls[url] = site_url
 
-    site_url = url
+    to_visit = deque()
+    to_visit.append((site_url, None))
 
-    while not to_visit.empty():
-        url, from_url = to_visit.get()
+    while to_visit:
+        url, from_url = to_visit.pop()
 
         print('Visiting', url, 'from', from_url)
-        is_html = False
+
         error = False
         error_obj = None
-
         try:
-            head = requests.head(url, timeout=10)
-            if head and 'html' in head.headers.get('content-type', ''):
-                page = requests.get(url, timeout=10)
-                is_html = True
+            page = requests.get(url, timeout=10)
         except requests.exceptions.RequestException as e:
             error = True
             error_obj = e
 
-        if error or not head or (is_html and not page):
-            error = str(error_obj) if error else head.status_code
-            visited.add(url)
-            error_codes[url] = error
-            edges.add((from_url, url))
-            print(f'{error} ERROR while visitng {url}')
-            continue
-
-        # Handle redirects and get consistent URL
-        url = head.url
-
-        if from_url is not None:
-            edges.add((from_url, url))
-
-        if not is_html:
-            resouce_pages.add(url)
-        
-        if url in visited:
+        if error or not page:
+            handle_error(error, error_obj, page, url, visited, error_codes)
             continue
         
-        visited.add(url)
-        
-        if not url.startswith(site_url) or not is_html:
-            continue
-        
-        soup = BeautifulSoup(page.text, 'html.parser', from_encoding=page.apparent_encoding)
+        soup = BeautifulSoup(page.text, 'html.parser')
         internal_links = set()
         external_links = set()
+
+        # Handle <base> tags
+        base_url = soup.find('base')
+        base_url = '' if base_url is None else base_url.get('href', '')
+
         for link in soup.find_all('a', href=True):
             link_url = link['href']
         
@@ -78,16 +68,45 @@ def crawl(url, visit_external):
             
             # Resolve relative paths
             if not link_url.startswith('http'):
-                link_url = urllib.parse.urljoin(url, link_url)
+                link_url = urllib.parse.urljoin(url, urllib.parse.urljoin(base_url, link_url))
 
-            # Remove queries/fragments
-            link_url = urllib.parse.urljoin(link_url, urllib.parse.urlparse(link_url).path)
+            # Remove queries/fragments from internal links
+            if link_url.startswith(site_url):
+                link_url = urllib.parse.urljoin(link_url, urllib.parse.urlparse(link_url).path)
+
+            # Load canonical version of link_url
+            if link_url in canonical_urls:
+                link_url = canonical_urls[link_url]
 
             if link_url not in visited and (visit_external or link_url.startswith(site_url)):
-                to_visit.put((link_url, url))
-            else:
-                edges.add((url, link_url))
+                is_html = False
+                error = False
+                error_obj = None
 
+                try:
+                    head = requests.head(link_url, timeout=10)
+                    if head and 'html' in head.headers.get('content-type', ''):
+                        is_html = True
+                except requests.exceptions.RequestException as e:
+                    error = True
+                    error_obj = e
+
+                if error or not head:
+                    handle_error(error, error_obj, head, link_url, visited, error_codes)
+                    edges.add((url, link_url))
+                    continue
+                
+                canonical_urls[link_url] = head.url
+                link_url = head.url
+                visited.add(link_url)
+
+                if link_url.startswith(site_url):
+                    if is_html:
+                        to_visit.append((head.url, url))
+                    else:
+                        resouce_pages.add(link_url)
+            
+            edges.add((url, link_url))
 
     return edges, error_codes, resouce_pages
 
@@ -121,7 +140,7 @@ def visualize(edges, error_codes, resouce_pages, args):
             node['color'] = EXTERNAL_COLOR
 
         if node['title'] in error_codes:
-            node['title'] = f'{error_codes[node["title"]]}Error: <a href="{node["title"]}">{node["title"]}</a>'
+            node['title'] = f'{error_codes[node["title"]]} Error: <a href="{node["title"]}">{node["title"]}</a>'
             node['color'] = ERROR_COLOR
         else:
             node['title'] = f'<a href="{node["title"]}">{node["title"]}</a>'
@@ -162,7 +181,7 @@ if __name__ == '__main__':
             pickle.dump((edges, error_codes, resource_pages, args.site_url), f)
             print(f'Saved crawl data to {args.data_file}')
     else:
-        with open(args.data_file, 'rb') as f:
+        with open(args.from_data_file, 'rb') as f:
             edges, error_codes, resource_pages, site_url = pickle.load(f)
             args.site_url = site_url
 
