@@ -5,6 +5,8 @@ from pyvis.network import Network
 import networkx as nx
 import argparse
 import pickle
+import scipy
+import numpy as np
 
 from collections import deque
 
@@ -111,9 +113,38 @@ def crawl(url, visit_external):
     return edges, error_codes, resouce_pages
 
 
+def get_node_info(nodes, error_codes, resource_pages, args):
+    node_info = []
+    for node in nodes:
+        if node in error_codes:
+            node_info.append(f'Error: {error_codes[node]}')
+        elif node in resource_pages:
+            node_info.append('resource')
+        elif node.startswith(args.site_url):
+            node_info.append('internal')
+        else:
+            node_info.append('external')
+    return node_info
+
+
 def visualize(edges, error_codes, resouce_pages, args):
     G = nx.DiGraph()
     G.add_edges_from(edges)
+
+    if args.save_txt is not None or args.save_npz is not None:
+        nodes = list(G.nodes())
+        adj_matrix = nx.to_numpy_matrix(G, nodelist=nodes, dtype=int)
+
+        if args.save_npz is not None:
+            base_fname = args.save_npz.replace('.npz', '')
+            scipy.sparse.save_npz(args.save_npz, scipy.sparse.coo_matrix(adj_matrix))
+        else:
+            base_fname = args.save_txt.replace('.txt', '')
+            np.savetxt(args.save_txt, adj_matrix, fmt='%d')
+
+        node_info = get_node_info(nodes, error_codes, resource_pages, args)
+        with open(base_fname + '_nodes.txt', 'w') as f:
+            f.write('\n'.join([nodes[i] + '\t' + node_info[i] for i in range(len(nodes))]))
 
     net = Network(width=args.width, height=args.height, directed=True)
     net.from_nx(G)
@@ -160,6 +191,8 @@ if __name__ == '__main__':
     parser.add_argument('--options', type=str, help='file with drawing options (use --show-buttons to configure, then generate options)')
     parser.add_argument('--from-data-file', type=str, help='create visualization from given data file', default=None)
     parser.add_argument('--force', action='store_true', help='override warnings about base URL')
+    parser.add_argument('--save-txt', type=str, nargs='?', help='filename in which to save adjacency matrix (if no argument, uses adj_matrix.txt). Also saves node labels to [filename]_nodes.txt', const='adj_matrix.txt', default=None)
+    parser.add_argument('--save-npz', type=str, nargs='?', help='filename in which to save sparse adjacency matrix (if no argument, uses adj_matrix.npz). Also saves node labels to [filename]_nodes.txt',  const='adj_matrix.npz', default=None)
 
     args = parser.parse_args()
 
