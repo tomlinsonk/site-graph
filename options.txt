@@ -13,9 +13,8 @@ var options = {
   },
   "physics": {
     "barnesHut": {
-      "gravitationalConstant": -4750,
-      "springLength": 120,
-      "springConstant": 0.015
+      "gravitationalConstant": -10000,
+      "springConstant": 0.003
     },
     "minVelocity": 0.75
   }

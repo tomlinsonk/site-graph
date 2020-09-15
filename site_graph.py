@@ -97,7 +97,7 @@ def crawl(url, visit_external):
                     handle_error(error, error_obj, head, link_url, visited, error_codes)
                     edges.add((url, link_url))
                     continue
-                
+
                 canonical_urls[link_url] = head.url
                 link_url = head.url
                 visited.add(link_url)
@@ -163,18 +163,18 @@ def visualize(edges, error_codes, resouce_pages, args):
     for node in net.nodes:
         node['size'] = 15
         node['label'] = ''
-        if node['title'].startswith(args.site_url):
+        if node['id'].startswith(args.site_url):
             node['color'] = INTERNAL_COLOR
-            if node['title'] in resouce_pages:
+            if node['id'] in resouce_pages:
                 node['color'] = RESOURCE_COLOR
         else:
             node['color'] = EXTERNAL_COLOR
 
-        if node['title'] in error_codes:
-            node['title'] = f'{error_codes[node["title"]]} Error: <a href="{node["title"]}">{node["title"]}</a>'
+        if node['id'] in error_codes:
+            node['title'] = f'{error_codes[node["id"]]} Error: <a href="{node["id"]}">{node["id"]}</a>'
             node['color'] = ERROR_COLOR
         else:
-            node['title'] = f'<a href="{node["title"]}">{node["title"]}</a>'
+            node['title'] = f'<a href="{node["id"]}">{node["id"]}</a>'
 
     net.save_graph(args.vis_file)
 
