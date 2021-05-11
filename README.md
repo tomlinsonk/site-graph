@@ -8,6 +8,7 @@ python3
 - pyvis
 - networkx
 - requests
+- scipy
 
 ## Running
 Replacing my URL with yours, run:
