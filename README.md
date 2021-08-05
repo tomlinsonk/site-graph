@@ -18,6 +18,7 @@ python3
 ```
 git clone https://github.com/tomlinsonk/site-graph.git
 cd site-graph
+pip3 install -r requirements.txt
 python3 site_graph.py https://www.cs.cornell.edu/~kt/
 ```
 
