@@ -14,8 +14,16 @@ python3
 - scipy
 
 ## Running
-Replacing my URL with yours, run:
-```python3 site_graph.py https://www.cs.cornell.edu/~kt/```
+
+```
+git clone https://github.com/tomlinsonk/site-graph.git
+cd site-graph
+pip3 install -r requirements.txt
+python3 site_graph.py https://www.cs.cornell.edu/~kt/
+```
+
+To see site of interest for you, just change the URL.
+
 To see more options, run:
 ```python3 site_graph.py -h```
 
