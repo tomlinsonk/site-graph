@@ -183,7 +183,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Visualize the link graph of a website.')
     parser.add_argument('site_url', type=str, help='the base URL of the website', nargs='?', default='')
     parser.add_argument('--vis-file', type=str, help='filename in which to save HTML graph visualization (default: site.html)', default='site.html')
-    parser.add_argument('--data-file', type=str, help='filename in which to save crawled graph data (default: edges.pickle)', default='crawl.pickle')
+    default_filename = 'crawl.pickle'
+    parser.add_argument('--data-file', type=str, help='filename in which to save crawled graph data (default: ' + default_filename + ')', default=default_filename)
     parser.add_argument('--width', type=int, help='width of graph visualization in pixels (default: 800)', default=1000)
     parser.add_argument('--height', type=int, help='height of graph visualization in pixels (default: 800)', default=800)
     parser.add_argument('--visit-external', action='store_true', help='detect broken external links (slower)')
