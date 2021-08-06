@@ -28,11 +28,11 @@ def crawl(url, visit_external):
     edges = set()
     resouce_pages = set()
     error_codes = dict()
-    canonical_urls = dict() 
+    redirect_target_url = dict()
 
     head = requests.head(url, timeout=10)
     site_url = head.url
-    canonical_urls[url] = site_url
+    redirect_target_url[url] = site_url
 
     to_visit = deque()
     to_visit.append((site_url, None))
@@ -76,9 +76,9 @@ def crawl(url, visit_external):
             if link_url.startswith(site_url):
                 link_url = urllib.parse.urljoin(link_url, urllib.parse.urlparse(link_url).path)
 
-            # Load canonical version of link_url
-            if link_url in canonical_urls:
-                link_url = canonical_urls[link_url]
+            # Load where we know that link_url will be redirected
+            if link_url in redirect_target_url:
+                link_url = redirect_target_url[link_url]
 
             if link_url not in visited and (visit_external or link_url.startswith(site_url)):
                 is_html = False
@@ -98,7 +98,7 @@ def crawl(url, visit_external):
                     edges.add((url, link_url))
                     continue
 
-                canonical_urls[link_url] = head.url
+                redirect_target_url[link_url] = head.url
                 link_url = head.url
                 visited.add(link_url)
 
