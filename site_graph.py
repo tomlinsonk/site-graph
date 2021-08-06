@@ -20,7 +20,7 @@ def handle_error(error, error_obj, r, url, visited, error_codes):
     error = str(error_obj) if error else r.status_code
     visited.add(url)
     error_codes[url] = error
-    print(f'{error} ERROR while visitng {url}')
+    print(f'{error} ERROR while visiting {url}')
 
 
 def crawl(url, visit_external):
