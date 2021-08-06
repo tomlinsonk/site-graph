@@ -11,8 +11,8 @@ import numpy as np
 from collections import deque
 
 INTERNAL_COLOR = '#0072BB'
-EXTERNAL_COLOR = '#F45B69'
-ERROR_COLOR = '#FFE74C'
+EXTERNAL_COLOR = '#FF9F40'
+ERROR_COLOR = '#FF00FF'
 RESOURCE_COLOR = '#2ECC71'
 
 
