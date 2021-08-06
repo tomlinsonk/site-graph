@@ -26,7 +26,7 @@ def handle_error(error, error_obj, r, url, visited, error_codes):
 def crawl(url, visit_external):
     visited = set()
     edges = set()
-    resouce_pages = set()
+    resource_pages = set()
     error_codes = dict()
     canonical_urls = dict() 
 
@@ -106,11 +106,11 @@ def crawl(url, visit_external):
                     if is_html:
                         to_visit.append((head.url, url))
                     else:
-                        resouce_pages.add(link_url)
+                        resource_pages.add(link_url)
             
             edges.add((url, link_url))
 
-    return edges, error_codes, resouce_pages
+    return edges, error_codes, resource_pages
 
 
 def get_node_info(nodes, error_codes, resource_pages, args):
@@ -127,7 +127,7 @@ def get_node_info(nodes, error_codes, resource_pages, args):
     return node_info
 
 
-def visualize(edges, error_codes, resouce_pages, args):
+def visualize(edges, error_codes, resource_pages, args):
     G = nx.DiGraph()
     G.add_edges_from(edges)
 
@@ -165,7 +165,7 @@ def visualize(edges, error_codes, resouce_pages, args):
         node['label'] = ''
         if node['id'].startswith(args.site_url):
             node['color'] = INTERNAL_COLOR
-            if node['id'] in resouce_pages:
+            if node['id'] in resource_pages:
                 node['color'] = RESOURCE_COLOR
         else:
             node['color'] = EXTERNAL_COLOR
