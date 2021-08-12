@@ -11,8 +11,8 @@ import numpy as np
 from collections import deque
 
 INTERNAL_COLOR = '#0072BB'
-EXTERNAL_COLOR = '#F45B69'
-ERROR_COLOR = '#FFE74C'
+EXTERNAL_COLOR = '#FF9F40'
+ERROR_COLOR = '#FF0800'
 RESOURCE_COLOR = '#2ECC71'
 
 
@@ -187,9 +187,9 @@ if __name__ == '__main__':
     default = 'crawl.pickle'
     parser.add_argument('--data-file', type=str, help='filename in which to save crawled graph data (default: ' + default + ')', default=default)
     default = 1000
-    parser.add_argument('--width', type=int, help='width of graph visualization in pixels (default: ' + default + ')', default=default)
+    parser.add_argument('--width', type=int, help='width of graph visualization in pixels (default: ' + str(default) + ')', default=default)
     default = 800
-    parser.add_argument('--height', type=int, help='height of graph visualization in pixels (default: ' + default + ')', default=default)
+    parser.add_argument('--height', type=int, help='height of graph visualization in pixels (default: ' + str(default) + ')', default=default)
     parser.add_argument('--visit-external', action='store_true', help='detect broken external links (slower)')
     parser.add_argument('--show-buttons', action='store_true', help='show visualization settings UI')
     parser.add_argument('--options', type=str, help='file with drawing options (use --show-buttons to configure, then generate options)')

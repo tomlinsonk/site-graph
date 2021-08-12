@@ -27,7 +27,7 @@ To see site of interest for you, just change the URL.
 To see more options, run:
 ```python3 site_graph.py -h```
 
-Blue nodes are internal pages, green nodes are internal resource files (anything that isn't HTML), red nodes are external pages, and yellow nodes are pages with errors. Hover over nodes to see URLs and specific errors (e.g. 404, 500, timeout).  
+Blue nodes are internal pages, green nodes are internal resource files (anything that isn't HTML), orange nodes are external pages, and red nodes are pages with errors. Hover over nodes to see URLs and specific errors (e.g. 404, 500, timeout).
 
 
 ## Contributing
