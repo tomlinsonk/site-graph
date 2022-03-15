@@ -29,6 +29,7 @@ To see more options, run:
 
 Blue nodes are internal pages, green nodes are internal resource files (anything that isn't HTML), orange nodes are external pages, and red nodes are pages with errors. Hover over nodes to see URLs and specific errors (e.g. 404, 500, timeout).
 
+To see a graph of a local files, serve the files using a simple local HTTP server such as [Twisted](https://github.com/twisted/twisted) (in Python), usage: `twistd -no web --path=[path to files]`, or [http-server](https://github.com/http-party/http-server) (in Node.js), usage: `http-server [path to files]`, and use the resulting URL, for example: `python3 site_graph.py http://localhost:8080/`
 
 ## Contributing
 This code is under a MIT License. Feel free to make pull requests if there are some features you'd like included (or bugs you'd like fixed).
