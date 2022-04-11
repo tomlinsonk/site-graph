@@ -202,13 +202,13 @@ if __name__ == '__main__':
 
     if args.from_data_file is None:
         if not args.site_url.endswith('/'):
-            print('Warning: no trailing slash on site_url (may get duplicate homepage node). If you really don\'t want the trailing slash, run with --force')
             if not args.force:
+                print('Warning: no trailing slash on site_url (may get duplicate homepage node). If you really don\'t want the trailing slash, run with --force')
                 exit(1)
 
         if not args.site_url.startswith('https'):
-            print('Warning: not using https. If you really want to use http, run with --force')
             if not args.force:
+                print('Warning: not using https. If you really want to use http, run with --force')
                 exit(1)
 
         edges, error_codes, resource_pages = crawl(args.site_url, args.visit_external)
