@@ -4,3 +4,4 @@ networkx
 argparse
 scipy
 numpy
+requests
