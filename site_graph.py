@@ -12,8 +12,8 @@ import numpy as np
 from collections import deque
 
 INTERNAL_COLOR = '#0072BB'
-EXTERNAL_COLOR = '#F45B69'
-ERROR_COLOR = '#FFE74C'
+EXTERNAL_COLOR = '#FF9F40'
+ERROR_COLOR = '#FF0800'
 RESOURCE_COLOR = '#2ECC71'
 
 
@@ -22,20 +22,18 @@ def handle_error(error, error_obj, r, url, visited, error_codes):
     visited.add(url)
     error_codes[url] = error
     print(f'{error} ERROR while visiting {url}')
-    
 
 
 def crawl(url, visit_external, keep_queries):
     visited = set()
     edges = set()
-    resouce_pages = set()
+    resource_pages = set()
     error_codes = dict()
-    canonical_urls = dict() 
+    redirect_target_url = dict()
 
     head = requests.head(url, timeout=10)
-
-    site_url = head.url.rstrip('/')
-    canonical_urls[url] = site_url
+    site_url = head.url
+    redirect_target_url[url] = site_url
 
     to_visit = deque()
     to_visit.append((site_url, None))
@@ -79,9 +77,9 @@ def crawl(url, visit_external, keep_queries):
             if not keep_queries and link_url.startswith(site_url):
                 link_url = urllib.parse.urljoin(link_url, urllib.parse.urlparse(link_url).path)
 
-            # Load canonical version of link_url
-            if link_url in canonical_urls:
-                link_url = canonical_urls[link_url]
+            # Load where we know that link_url will be redirected
+            if link_url in redirect_target_url:
+                link_url = redirect_target_url[link_url]
 
             if link_url not in visited and (visit_external or link_url.startswith(site_url)):
                 is_html = False
@@ -101,20 +99,20 @@ def crawl(url, visit_external, keep_queries):
                     edges.add((url, link_url))
                     continue
 
-                canonical_urls[link_url] = head.url.rstrip('/')
+                redirect_target_url[link_url] = head.url.rstrip('/')
                 visited.add(link_url)
-                link_url = canonical_urls[link_url]
+                link_url = head.url
                 visited.add(link_url)
 
                 if link_url.startswith(site_url):
                     if is_html:
                         to_visit.append((link_url, url))
                     else:
-                        resouce_pages.add(link_url)
+                        resource_pages.add(link_url)
             
             edges.add((url, link_url))
 
-    return edges, error_codes, resouce_pages
+    return edges, error_codes, resource_pages
 
 
 def get_node_info(nodes, error_codes, resource_pages, args):
@@ -131,7 +129,7 @@ def get_node_info(nodes, error_codes, resource_pages, args):
     return node_info
 
 
-def visualize(edges, error_codes, resouce_pages, args):
+def visualize(edges, error_codes, resource_pages, args):
     G = nx.DiGraph()
     G.add_edges_from(edges)
 
@@ -169,7 +167,7 @@ def visualize(edges, error_codes, resouce_pages, args):
         node['label'] = ''
         if node['id'].startswith(args.site_url):
             node['color'] = INTERNAL_COLOR
-            if node['id'] in resouce_pages:
+            if node['id'] in resource_pages:
                 node['color'] = RESOURCE_COLOR
         else:
             node['color'] = EXTERNAL_COLOR
@@ -186,10 +184,14 @@ def visualize(edges, error_codes, resouce_pages, args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Visualize the link graph of a website.')
     parser.add_argument('site_url', type=str, help='the base URL of the website', nargs='?', default='')
-    parser.add_argument('--vis-file', type=str, help='filename in which to save HTML graph visualization (default: site.html)', default='site.html')
-    parser.add_argument('--data-file', type=str, help='filename in which to save crawled graph data (default: edges.pickle)', default='crawl.pickle')
-    parser.add_argument('--width', type=int, help='width of graph visualization in pixels (default: 800)', default=1000)
-    parser.add_argument('--height', type=int, help='height of graph visualization in pixels (default: 800)', default=800)
+    default = 'site.html'
+    parser.add_argument('--vis-file', type=str, help='filename in which to save HTML graph visualization (default: ' + default + ')', default=default)
+    default = 'crawl.pickle'
+    parser.add_argument('--data-file', type=str, help='filename in which to save crawled graph data (default: ' + default + ')', default=default)
+    default = 1000
+    parser.add_argument('--width', type=int, help='width of graph visualization in pixels (default: ' + str(default) + ')', default=default)
+    default = 800
+    parser.add_argument('--height', type=int, help='height of graph visualization in pixels (default: ' + str(default) + ')', default=default)
     parser.add_argument('--visit-external', action='store_true', help='detect broken external links (slower)')
     parser.add_argument('--show-buttons', action='store_true', help='show visualization settings UI')
     parser.add_argument('--options', type=str, help='file with drawing options (use --show-buttons to configure, then generate options)')
@@ -204,8 +206,8 @@ if __name__ == '__main__':
 
     if args.from_data_file is None:
         if not args.site_url.startswith('https'):
-            print('Warning: not using https. If you really want to use http, run with --force')
             if not args.force:
+                print('Warning: not using https. If you really want to use http, run with --force')
                 exit(1)
 
         edges, error_codes, resource_pages = crawl(args.site_url, args.visit_external, args.keep_queries)

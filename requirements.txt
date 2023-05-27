@@ -1,0 +1,7 @@
+beautifulsoup4
+pyvis
+networkx
+argparse
+scipy
+numpy
+requests
