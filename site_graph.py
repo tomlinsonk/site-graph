@@ -1,3 +1,4 @@
+import time
 from bs4 import BeautifulSoup
 import urllib
 import requests
@@ -20,10 +21,11 @@ def handle_error(error, error_obj, r, url, visited, error_codes):
     error = str(error_obj) if error else r.status_code
     visited.add(url)
     error_codes[url] = error
-    print(f'{error} ERROR while visitng {url}')
+    print(f'{error} ERROR while visiting {url}')
+    
 
 
-def crawl(url, visit_external):
+def crawl(url, visit_external, keep_queries):
     visited = set()
     edges = set()
     resouce_pages = set()
@@ -31,7 +33,8 @@ def crawl(url, visit_external):
     canonical_urls = dict() 
 
     head = requests.head(url, timeout=10)
-    site_url = head.url
+
+    site_url = head.url.rstrip('/')
     canonical_urls[url] = site_url
 
     to_visit = deque()
@@ -64,7 +67,7 @@ def crawl(url, visit_external):
 
         for link in soup.find_all('a', href=True):
             link_url = link['href']
-        
+
             if link_url.startswith('mailto:'):
                 continue
             
@@ -73,7 +76,7 @@ def crawl(url, visit_external):
                 link_url = urllib.parse.urljoin(url, urllib.parse.urljoin(base_url, link_url))
 
             # Remove queries/fragments from internal links
-            if link_url.startswith(site_url):
+            if not keep_queries and link_url.startswith(site_url):
                 link_url = urllib.parse.urljoin(link_url, urllib.parse.urlparse(link_url).path)
 
             # Load canonical version of link_url
@@ -98,13 +101,14 @@ def crawl(url, visit_external):
                     edges.add((url, link_url))
                     continue
 
-                canonical_urls[link_url] = head.url
-                link_url = head.url
+                canonical_urls[link_url] = head.url.rstrip('/')
+                visited.add(link_url)
+                link_url = canonical_urls[link_url]
                 visited.add(link_url)
 
                 if link_url.startswith(site_url):
                     if is_html:
-                        to_visit.append((head.url, url))
+                        to_visit.append((link_url, url))
                     else:
                         resouce_pages.add(link_url)
             
@@ -193,21 +197,18 @@ if __name__ == '__main__':
     parser.add_argument('--force', action='store_true', help='override warnings about base URL')
     parser.add_argument('--save-txt', type=str, nargs='?', help='filename in which to save adjacency matrix (if no argument, uses adj_matrix.txt). Also saves node labels to [filename]_nodes.txt', const='adj_matrix.txt', default=None)
     parser.add_argument('--save-npz', type=str, nargs='?', help='filename in which to save sparse adjacency matrix (if no argument, uses adj_matrix.npz). Also saves node labels to [filename]_nodes.txt',  const='adj_matrix.npz', default=None)
+    parser.add_argument('--keep-queries', type=bool, help='create visualization from given data file', default=False)
+
 
     args = parser.parse_args()
 
     if args.from_data_file is None:
-        if not args.site_url.endswith('/'):
-            print('Warning: no trailing slash on site_url (may get duplicate homepage node). If you really don\'t want the trailing slash, run with --force')
-            if not args.force:
-                exit(1)
-
         if not args.site_url.startswith('https'):
             print('Warning: not using https. If you really want to use http, run with --force')
             if not args.force:
                 exit(1)
 
-        edges, error_codes, resource_pages = crawl(args.site_url, args.visit_external)
+        edges, error_codes, resource_pages = crawl(args.site_url, args.visit_external, args.keep_queries)
         print('Crawl complete.')
 
         with open(args.data_file, 'wb') as f:
