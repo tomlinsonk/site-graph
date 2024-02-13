@@ -24,6 +24,10 @@ def handle_error(error, error_obj, r, url, visited, error_codes):
     print(f'{error} ERROR while visiting {url}')
 
 
+def has_been_visited(url, visited):
+    return url in visited or url.rstrip('/') in visited or url + '/' in visited
+
+
 def crawl(url, visit_external, keep_queries):
     visited = set()
     edges = set()
@@ -55,9 +59,11 @@ def crawl(url, visit_external, keep_queries):
             handle_error(error, error_obj, page, url, visited, error_codes)
             continue
         
+        # Don't look for links in external pages
+        if not url.startswith(site_url):
+            continue
+
         soup = BeautifulSoup(page.text, 'html.parser')
-        internal_links = set()
-        external_links = set()
 
         # Handle <base> tags
         base_url = soup.find('base')
@@ -81,7 +87,7 @@ def crawl(url, visit_external, keep_queries):
             if link_url in redirect_target_url:
                 link_url = redirect_target_url[link_url]
 
-            if link_url not in visited and (visit_external or link_url.startswith(site_url)):
+            if not has_been_visited(link_url, visited) and (visit_external or link_url.startswith(site_url)):
                 is_html = False
                 error = False
                 error_obj = None
@@ -99,16 +105,17 @@ def crawl(url, visit_external, keep_queries):
                     edges.add((url, link_url))
                     continue
 
-                redirect_target_url[link_url] = head.url.rstrip('/')
                 visited.add(link_url)
-                link_url = head.url
+                
+                redirect_target_url[link_url] = head.url
+                link_url = redirect_target_url[link_url]
                 visited.add(link_url)
 
-                if link_url.startswith(site_url):
-                    if is_html:
+                if is_html:
+                    if url.startswith(site_url):
                         to_visit.append((link_url, url))
-                    else:
-                        resource_pages.add(link_url)
+                else:
+                    resource_pages.add(link_url)
             
             edges.add((url, link_url))
 
@@ -200,6 +207,7 @@ if __name__ == '__main__':
     parser.add_argument('--save-txt', type=str, nargs='?', help='filename in which to save adjacency matrix (if no argument, uses adj_matrix.txt). Also saves node labels to [filename]_nodes.txt', const='adj_matrix.txt', default=None)
     parser.add_argument('--save-npz', type=str, nargs='?', help='filename in which to save sparse adjacency matrix (if no argument, uses adj_matrix.npz). Also saves node labels to [filename]_nodes.txt',  const='adj_matrix.npz', default=None)
     parser.add_argument('--keep-queries', type=bool, help='create visualization from given data file', default=False)
+
 
 
     args = parser.parse_args()
