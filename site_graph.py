@@ -191,14 +191,17 @@ def visualize(edges, error_codes, resource_pages, args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Visualize the link graph of a website.')
     parser.add_argument('site_url', type=str, help='the base URL of the website', nargs='?', default='')
-    default = 'site.html'
-    parser.add_argument('--vis-file', type=str, help='filename in which to save HTML graph visualization (default: ' + default + ')', default=default)
-    default = 'crawl.pickle'
-    parser.add_argument('--data-file', type=str, help='filename in which to save crawled graph data (default: ' + default + ')', default=default)
-    default = 1000
-    parser.add_argument('--width', type=int, help='width of graph visualization in pixels (default: ' + str(default) + ')', default=default)
-    default = 800
-    parser.add_argument('--height', type=int, help='height of graph visualization in pixels (default: ' + str(default) + ')', default=default)
+
+    # Defaults
+    vis_file = 'site.html'
+    data_file = 'crawl.pickle'
+    width = 1000
+    height = 800
+
+    parser.add_argument('--vis-file', type=str, help=f'filename in which to save HTML graph visualization (default: {vis_file})', default=vis_file)
+    parser.add_argument('--data-file', type=str, help=f'filename in which to save crawled graph data (default: {data_file})', default=data_file)
+    parser.add_argument('--width', type=int, help=f'width of graph visualization in pixels (default: {width})', default=width)
+    parser.add_argument('--height', type=int, help=f'height of graph visualization in pixels (default: {height})', default=height)
     parser.add_argument('--visit-external', action='store_true', help='detect broken external links (slower)')
     parser.add_argument('--show-buttons', action='store_true', help='show visualization settings UI')
     parser.add_argument('--options', type=str, help='file with drawing options (use --show-buttons to configure, then generate options)')
@@ -206,9 +209,7 @@ if __name__ == '__main__':
     parser.add_argument('--force', action='store_true', help='override warnings about base URL')
     parser.add_argument('--save-txt', type=str, nargs='?', help='filename in which to save adjacency matrix (if no argument, uses adj_matrix.txt). Also saves node labels to [filename]_nodes.txt', const='adj_matrix.txt', default=None)
     parser.add_argument('--save-npz', type=str, nargs='?', help='filename in which to save sparse adjacency matrix (if no argument, uses adj_matrix.npz). Also saves node labels to [filename]_nodes.txt',  const='adj_matrix.npz', default=None)
-    parser.add_argument('--keep-queries', type=bool, help='create visualization from given data file', default=False)
-
-
+    parser.add_argument('--keep-queries',  action='store_true', help='create visualization from given data file')
 
     args = parser.parse_args()
 
