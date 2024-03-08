@@ -117,6 +117,7 @@ def crawl(url, visit_external, keep_queries):
                 else:
                     resource_pages.add(link_url)
             
+            # print(f'adding edge from {url} to {link_url}')
             edges.add((url, link_url))
 
     return edges, error_codes, resource_pages
@@ -139,6 +140,14 @@ def get_node_info(nodes, error_codes, resource_pages, args):
 def visualize(edges, error_codes, resource_pages, args):
     G = nx.DiGraph()
     G.add_edges_from(edges)
+
+    # Contract any extra nodes 
+    nodes = set(G.nodes)
+    for node in nodes:
+        alias = node + '/'
+        if alias in nodes:
+            print(f'Contracting {node} and {alias}')
+            G = nx.contracted_nodes(G, alias, node)
 
     if args.save_txt is not None or args.save_npz is not None:
         nodes = list(G.nodes())
@@ -181,9 +190,15 @@ def visualize(edges, error_codes, resource_pages, args):
 
         if node['id'] in error_codes:
             node['title'] = f'{error_codes[node["id"]]} Error: <a href="{node["id"]}">{node["id"]}</a>'
-            node['color'] = ERROR_COLOR
+            
+            if not args.only_404 or error_codes[node['id']] == 404:
+                node['color'] = ERROR_COLOR
         else:
             node['title'] = f'<a href="{node["id"]}">{node["id"]}</a>'
+    
+    # Remove saved contractions (otherwise save_graph crashes)
+    for edge in net.edges:
+        edge.pop('contraction', None)
 
     net.save_graph(args.vis_file)
 
@@ -210,6 +225,7 @@ if __name__ == '__main__':
     parser.add_argument('--save-txt', type=str, nargs='?', help='filename in which to save adjacency matrix (if no argument, uses adj_matrix.txt). Also saves node labels to [filename]_nodes.txt', const='adj_matrix.txt', default=None)
     parser.add_argument('--save-npz', type=str, nargs='?', help='filename in which to save sparse adjacency matrix (if no argument, uses adj_matrix.npz). Also saves node labels to [filename]_nodes.txt',  const='adj_matrix.npz', default=None)
     parser.add_argument('--keep-queries',  action='store_true', help='create visualization from given data file')
+    parser.add_argument('--only-404', action='store_true', help='only color 404 error nodes in the error color')
 
     args = parser.parse_args()
 
