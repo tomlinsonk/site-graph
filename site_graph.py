@@ -151,7 +151,7 @@ def visualize(edges, error_codes, resource_pages, args):
 
     if args.save_txt is not None or args.save_npz is not None:
         nodes = list(G.nodes())
-        adj_matrix = nx.to_numpy_matrix(G, nodelist=nodes, dtype=int)
+        adj_matrix = nx.to_numpy_array(G, nodelist=nodes, dtype=int)
 
         if args.save_npz is not None:
             base_fname = args.save_npz.replace('.npz', '')
