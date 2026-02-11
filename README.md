@@ -13,15 +13,33 @@ python3
 - requests
 - scipy
 
-## Running
+## Setup with Virtual Environment (recommended)
 
 ```
 git clone https://github.com/tomlinsonk/site-graph.git
 cd site-graph
+python3 -m venv venv
+source venv/bin/activate
 pip3 install -r requirements.txt
-python3 site_graph.py https://www.cs.cornell.edu/~kt/
 ```
 
+To use the project in a new terminal session:
+```
+source venv/bin/activate
+```
+
+To deaktivete the virtual environment:
+```
+deactivate
+```
+
+## Running
+
+**After activating the virtual environment:**
+
+```
+python3 site_graph.py https://www.cs.cornell.edu/~kt/
+```
 To see site of interest for you, just change the URL.
 
 To see more options, run:
