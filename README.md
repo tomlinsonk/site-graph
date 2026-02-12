@@ -2,8 +2,8 @@
 
 ![](example.png)
 
-- [my blog post about this project](https://www.cs.cornell.edu/~kt/post/site-graph/)
-- [a live example on my website](https://www.cs.cornell.edu/~kt/graph/)
+- [my blog post about this project](https://www.kirantomlinson.com/post/site-graph/)
+- [a live example on my website](https://www.kirantomlinson.com/graph/)
 
 ## Dependencies
 python3
@@ -28,7 +28,7 @@ To use the project in a new terminal session:
 source venv/bin/activate
 ```
 
-To deaktivete the virtual environment:
+To deactivate the virtual environment:
 ```
 deactivate
 ```
@@ -38,7 +38,7 @@ deactivate
 **After activating the virtual environment:**
 
 ```
-python3 site_graph.py https://www.cs.cornell.edu/~kt/
+python3 site_graph.py https://www.kirantomlinson.com/
 ```
 To see site of interest for you, just change the URL.
 
