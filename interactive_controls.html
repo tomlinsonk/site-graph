@@ -1,0 +1,174 @@
+<style>
+  #graph-controls { clear: both; padding: 1rem; font: 14px system-ui, sans-serif; color: #222; background: #fff; }
+  #graph-controls fieldset { display: inline-block; vertical-align: top; margin: .3rem; padding: .5rem; border: 1px solid #aaa; }
+  #graph-controls legend { float: none; width: auto; font-size: 1rem; }
+  #graph-controls label { display: inline-block; margin-right: .7rem; }
+  #graph-controls input[type=search] { width: min(32rem, 90%); }
+  #graph-controls select, #graph-controls button { max-width: 100%; margin: .2rem; }
+  #graph-matches { display: block; width: min(55rem, 100%); }
+  #graph-detail { white-space: pre-wrap; overflow-wrap: anywhere; }
+  #graph-legend span { display: inline-block; margin-right: 1rem; }
+</style>
+<section id="graph-controls" aria-label="Graph exploration">
+  <label for="graph-search">Find URL (including aliases)</label>
+  <input id="graph-search" type="search" placeholder="Type part of a URL" aria-describedby="graph-search-help">
+  <p id="graph-search-help">Up to 100 matches. Hidden matches are marked; selecting one resets filters to reveal it. Aliases select their canonical target.</p>
+  <label for="graph-matches">Matching URLs</label>
+  <select id="graph-matches"><option value="">Type to search</option></select>
+  <fieldset>
+    <legend>Targets</legend>
+    <label><input id="graph-internal" type="checkbox" checked> Internal pages / unknown types</label>
+    <label><input id="graph-resource" type="checkbox" checked> Resources (any scope)</label>
+    <label><input id="graph-external" type="checkbox" checked> External targets</label>
+  </fieldset>
+  <fieldset>
+    <legend>Health</legend>
+    <label for="graph-state">Check state</label>
+    <select id="graph-state">
+      <option value="all">All states</option>
+      <option value="success">Successful (2xx, no fetch failure)</option>
+      <option value="unchecked">Unchecked</option>
+      <option value="unknown">Unknown (legacy)</option>
+      <option value="other-checked">Other checked responses / failures</option>
+    </select>
+    <label for="graph-error">Error category</label>
+    <select id="graph-error">
+      <option value="all">All categories</option>
+      <option value="any">Any reported error</option>
+      <option value="none">No reported error (not proof of success)</option>
+      <option value="404">HTTP 404</option>
+      <option value="other-4xx">Other HTTP 4xx</option>
+      <option value="5xx">HTTP 5xx</option>
+      <option value="timeout">Timeout</option>
+      <option value="connection">Connection failure</option>
+      <option value="redirect">Redirect failure</option>
+      <option value="request">Other request failure</option>
+      <option value="legacy-error">Legacy error (unclassified)</option>
+    </select>
+  </fieldset>
+  <button id="graph-reset" type="button">Reset filters</button>
+  <button id="graph-clear" type="button">Clear selection</button>
+  <div id="graph-legend" aria-label="Legend">
+    <span style="color:#0072BB">Blue: internal</span>
+    <span style="color:#198b4a">Green: internal resource</span>
+    <span style="color:#ad5d0e">Orange: external</span>
+    <span style="color:#cf0700">Red: errors (404 only with --only-404)</span>
+    <span>Triangle: unchecked; diamond: unknown legacy; other shapes: checked</span>
+    <span style="color:#7b3294">Purple edges: incoming to selection</span>
+    <span style="color:#007f73">Teal edges: outgoing from selection</span>
+    <span style="color:#b21865">Pink edges: self-link (both directions)</span>
+  </div>
+  <p id="graph-status" role="status" aria-live="polite"></p>
+  <div id="graph-detail"></div>
+</section>
+<script>
+(() => {
+  "use strict";
+  const panel = document.getElementById("graph-controls");
+  document.getElementById("mynetwork").before(panel);
+  const get = id => document.getElementById("graph-" + id);
+  const originalNodes = nodes.get();
+  const originalEdges = edges.get();
+  const byId = new Map(originalNodes.map(node => [node.id, node]));
+  const controls = ["internal", "resource", "external", "state", "error"].map(get);
+  let selected = null;
+  let visible = new Set();
+
+  function allowed(node) {
+    const info = node.crawl;
+    if (info.scope === "external" && !get("external").checked) return false;
+    if (info.resource ? !get("resource").checked :
+        info.scope === "internal" && !get("internal").checked) return false;
+    const state = get("state").value;
+    const error = get("error").value;
+    return (state === "all" || state === info.state) &&
+      (error === "all" || (error === "any" && info.errors.length > 0) ||
+       (error === "none" && info.errors.length === 0) || info.errors.includes(error));
+  }
+
+  function matches() {
+    const query = get("search").value.trim().toLowerCase();
+    const list = get("matches");
+    list.replaceChildren(new Option(query ? "Choose a URL (first 100 matches)" : "Type to search", ""));
+    if (!query) return;
+    let count = 0;
+    for (const node of originalNodes) {
+      const alias = node.crawl.aliases.find(url => url.toLowerCase().includes(query));
+      if (!node.id.toLowerCase().includes(query) && !alias) continue;
+      const label = (visible.has(node.id) ? "" : "[hidden] ") + node.id +
+        (alias ? " (alias: " + alias + ")" : "");
+      list.add(new Option(label, node.id));
+      if (++count === 100) break;
+    }
+    if (!count) list.options[0].textContent = "No matching URLs";
+  }
+
+  function render() {
+    visible = new Set(originalNodes.filter(allowed).map(node => node.id));
+    if (!visible.has(selected)) selected = null;
+    const incoming = new Set();
+    const outgoing = new Set();
+    for (const edge of originalEdges) {
+      if (!visible.has(edge.from) || !visible.has(edge.to)) continue;
+      if (edge.to === selected) incoming.add(edge.from);
+      if (edge.from === selected) outgoing.add(edge.to);
+    }
+    // Only presentation fields change: never remove/re-add nodes or reset coordinates.
+    nodes.update(originalNodes.map(node => ({
+      id: node.id, hidden: !visible.has(node.id),
+      opacity: selected && node.id !== selected && !incoming.has(node.id) &&
+        !outgoing.has(node.id) ? 0.2 : (node.opacity ?? 1),
+      label: node.id === selected ?
+        (node.id.length > 100 ? node.id.slice(0, 97) + "..." : node.id) : node.label
+    })));
+    edges.update(originalEdges.map(edge => {
+      const into = selected !== null && edge.to === selected;
+      const out = selected !== null && edge.from === selected;
+      return {
+        id: edge.id, hidden: !visible.has(edge.from) || !visible.has(edge.to),
+        color: into || out ? {color: into && out ? "#b21865" : into ? "#7b3294" : "#007f73",
+          highlight: into && out ? "#b21865" : into ? "#7b3294" : "#007f73", inherit: false} :
+          (edge.color ?? null),
+        width: into || out ? 3 : (edge.width ?? null)
+      };
+    }));
+    network.selectNodes(selected === null ? [] : [selected], false);
+    get("status").textContent = visible.size + " / " + originalNodes.length + " targets visible." +
+      (selected === null ? " No selection." :
+        " Selection: " + incoming.size + " incoming, " + outgoing.size + " outgoing visible neighbors.");
+    get("detail").textContent = selected === null ? "" :
+      selected + "\n" + byId.get(selected).crawl.detail;
+    matches();
+  }
+
+  function resetFilters() {
+    for (const id of ["internal", "resource", "external"]) get(id).checked = true;
+    get("state").value = get("error").value = "all";
+  }
+
+  function select(id, focus) {
+    const reveal = id !== null && !visible.has(id);
+    if (reveal) resetFilters();
+    selected = id;
+    render();
+    if (reveal) get("status").textContent += " Filters reset to reveal the selected target.";
+    if (focus && id !== null) network.focus(id, {animation: false});
+  }
+
+  get("search").addEventListener("input", matches);
+  get("search").addEventListener("keydown", event => {
+    if (event.key === "Enter" && get("matches").options.length > 1) {
+      select(get("matches").options[1].value, true);
+    }
+    if (event.key === "Escape") select(null, false);
+  });
+  get("matches").addEventListener("change", event => {
+    if (event.target.value) select(event.target.value, true);
+  });
+  for (const control of controls) control.addEventListener("change", render);
+  get("reset").addEventListener("click", () => { resetFilters(); render(); });
+  get("clear").addEventListener("click", () => select(null, false));
+  network.on("click", event => select(event.nodes.length ? event.nodes[0] : null, false));
+  render();
+})();
+</script>
