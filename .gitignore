@@ -1,3 +1,6 @@
 *.pickle
 *.html
 __pycache__/
+.DS_Store
+lib/
+.ipynb_checkpoints/
