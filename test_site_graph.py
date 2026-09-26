@@ -1,4 +1,6 @@
 import copy
+import contextlib
+import io
 import json
 import pickle
 import runpy
@@ -11,9 +13,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import requests
+from pyvis.network import Network
 
-from crawl_result import validate_crawl_data, write_json
-from site_graph import crawl, crawl_site, fetch, is_internal, resolve_url, visualize
+from crawl_result import (
+    CrawlNode, CrawlResult, FetchError, Observation, from_dict, from_legacy,
+    load_data, validate_crawl_data, write_json,
+)
+from site_graph import crawl, crawl_site, fetch, is_internal, main, recheck_external, resolve_url, summarize, visualize
 
 
 def response(status=200, body='', headers=None):
@@ -186,7 +192,7 @@ class CrawlTests(unittest.TestCase):
                                width=1000, height=800, show_buttons=False, options=None,
                                only_404=False, vis_file='unused.html')
         with patch('site_graph.Network') as network:
-            visualize(set(), {}, set(), args)
+            visualize(from_legacy((set(), {}, set(), root)), args)
             graph = network.return_value.from_nx.call_args.args[0]
             self.assertEqual(set(graph.nodes), {root})
         for unusable in (response(404), response(headers={'Content-Type': 'application/pdf'})):
@@ -430,6 +436,228 @@ class JsonTests(unittest.TestCase):
                             runpy.run_path(script, run_name='__main__')
                     self.assertEqual(error.exception.code, 2)
                     session.request.assert_not_called()
+
+
+class SavedWorkflowTests(unittest.TestCase):
+    root = 'https://example.org/site/'
+    outside = 'https://outside.test/?query=kept'
+
+    def result(self):
+        result = CrawlResult(self.root, self.root, {
+            'visit_external': False, 'keep_queries': False, 'workers': 1,
+        }, generated_at='2026-09-26T07:00:00Z')
+        result.nodes = {
+            self.root: CrawlNode(self.root, 'internal', observations=[
+                Observation('GET', 200, type='page', discovered=True),
+            ]),
+            self.outside: CrawlNode(self.outside, 'external'),
+        }
+        result.edges = {(self.root, self.outside)}
+        return result
+
+    def cli(self, *args):
+        output = io.StringIO()
+        with patch('sys.argv', ['site_graph.py', *map(str, args)]), contextlib.redirect_stdout(output), \
+                patch('site_graph.Network', side_effect=lambda **kwargs: Network(
+                    cdn_resources='in_line', **kwargs)):
+            main()
+        return output.getvalue()
+
+    @patch('requests.sessions.Session.request', side_effect=AssertionError('unexpected network'))
+    def test_json_rerender_no_network_real_outputs_and_roundtrip(self, request):
+        result = self.result()
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            source, exported = directory / 'input.json', directory / 'copy.json'
+            html, matrix = directory / 'graph.html', directory / 'matrix.txt'
+            options = directory / 'options.txt'
+            options.write_text('var options = {"physics": false};')
+            write_json(result, source)
+            original = source.read_bytes()
+            output = self.cli('--from-data-file', source, '--json-file', exported,
+                              '--vis-file', html, '--save-txt', matrix, '--options', options)
+            self.assertEqual(load_data(exported).to_dict(), result.to_dict())
+            self.assertEqual(source.read_bytes(), original)
+            self.assertTrue(html.is_file())
+            self.assertIn(self.root, html.read_text())
+            self.assertIn('"enabled": false', html.read_text())
+            self.assertEqual(matrix.read_text().strip(), '0 1\n0 0')
+            self.assertIn(self.outside, (directory / 'matrix_nodes.txt').read_text())
+            self.assertIn('1 checked, 1 unchecked', output)
+            self.assertIn('Discovery: complete.', output)
+            request.assert_not_called()
+
+    def test_legacy_unknown_metadata_and_validation(self):
+        missing, resource = self.root + 'gone', self.root + 'asset'
+        result = from_legacy(({(self.root, missing)}, {missing: 404}, {resource}, self.root))
+        self.assertTrue(result.is_legacy)
+        self.assertIsNone(result.generated_at)
+        self.assertIsNone(result.requested_root_url)
+        self.assertTrue(all(value is None for value in result.settings.values()))
+        for node in result.nodes.values():
+            self.assertEqual(node.to_dict()['check_state'], 'unknown')
+            self.assertEqual(node.to_dict()['type'], 'unknown')
+            self.assertIsNone(node.to_dict()['http_status'])
+            self.assertEqual(node.observations, [])
+        self.assertEqual(result.nodes[missing].error(), 404)
+        self.assertTrue(result.nodes[resource].is_resource())
+        self.assertIn(resource, result.graph_nodes())
+        self.assertIn('Discovery: unknown', summarize(result))
+        self.assertNotIn('2xx=', summarize(result))
+        with self.assertRaisesRegex(ValueError, 'unknown crawl metadata'):
+            result.to_dict()
+        with self.assertRaisesRegex(ValueError, 'unknown crawl settings'):
+            recheck_external(result)
+        for bad in ((), ({('bad', self.root)}, {}, set(), self.root),
+                    (set(), {}, set(), 'file:///root'), ({(self.root,)}, {}, set(), self.root)):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'Invalid legacy'):
+                from_legacy(bad)
+
+    @patch('site_graph.requests.Session')
+    def test_recheck_preserves_observations_aliases_discovery_and_referrers(self, session_class):
+        original = self.result()
+        alias, missing = 'https://old.test/', self.root + 'missing'
+        original.nodes[alias] = CrawlNode(alias, 'external', self.outside, [
+            Observation('HEAD', 301, redirect_to=self.outside),
+        ])
+        original.nodes[self.outside].observations = [
+            Observation('HEAD', fetch_error=FetchError('timeout', 'earlier timeout')),
+        ]
+        original.nodes[missing] = CrawlNode(missing, 'internal', observations=[
+            Observation('GET', 404, type='page'),
+        ])
+        original.edges.add((self.root, missing))
+        original.edges.add((self.root, self.root))
+        before = original.to_dict()
+        session = session_class.return_value.__enter__.return_value
+        session.request.side_effect = [
+            response(301, headers={'Location': self.root}),
+            response(405), response(503, headers={'Retry-After': '120'}),
+        ]
+        updated = recheck_external(from_dict(before))
+        self.assertEqual(original.to_dict(), before)
+        self.assertEqual(updated.requested_root_url, original.requested_root_url)
+        self.assertEqual(updated.resolved_root_url, original.resolved_root_url)
+        self.assertEqual(updated.settings, original.settings)
+        self.assertEqual(updated.nodes[alias].observations, original.nodes[alias].observations)
+        self.assertEqual(updated.nodes[alias].alias_of, self.root)
+        self.assertEqual(updated.nodes[self.outside].alias_of, self.root)
+        self.assertEqual(updated.nodes[self.outside].observations[0],
+                         original.nodes[self.outside].observations[0])
+        self.assertEqual(updated.nodes[self.root].observations[0], original.nodes[self.root].observations[0])
+        self.assertEqual(updated.nodes[missing], original.nodes[missing])
+        self.assertEqual(updated.edges, {(self.root, self.root), (self.root, missing)})
+        self.assertTrue(updated.to_dict()['discovery']['complete'])
+        self.assertEqual([call.args for call in session.request.call_args_list],
+                         [('HEAD', self.outside), ('HEAD', self.root), ('GET', self.root)])
+        text = summarize(updated)
+        self.assertIn('2 canonical nodes, 2 directed edges, 2 aliases', text)
+        self.assertIn('4xx=1, 5xx=1', text)
+        self.assertIn('Broken targets: 2', text)
+        self.assertIn('Referred by: ' + self.root, text)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'updated.json'
+            write_json(updated, path)
+            self.assertEqual(load_data(path).to_dict(), updated.to_dict())
+        session.request.reset_mock()
+        again = recheck_external(updated)
+        self.assertEqual(again.nodes, updated.nodes)
+        session.request.assert_not_called()
+
+    @patch('site_graph.requests.Session')
+    def test_cli_recheck_is_explicit_and_output_is_opt_in(self, session_class):
+        result = self.result()
+        session = session_class.return_value.__enter__.return_value
+        new_internal = self.root + 'new?keep=identity'
+        session.request.side_effect = [
+            response(302, headers={'Location': new_internal}), response(),
+            response(404),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            source, output = directory / 'input.json', directory / 'updated.json'
+            html = directory / 'graph.html'
+            write_json(result, source)
+            original = source.read_bytes()
+            text = self.cli('--from-data-file', source, '--recheck-external', '--vis-file', html)
+            self.assertIn('updated in memory only', text)
+            self.assertIn('Discovery: incomplete (not_discovered=1)', text)
+            self.assertFalse(output.exists())
+            self.assertEqual(source.read_bytes(), original)
+            self.cli('--from-data-file', source, '--recheck-external', '--json-file', output,
+                     '--vis-file', html)
+            updated = load_data(output)
+            self.assertEqual(updated.nodes[self.outside].observations[-1].http_status, 404)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(session.request.call_args_list[1].args, ('HEAD', new_internal))
+
+    @patch('site_graph.requests.Session')
+    def test_recheck_reuses_canonical_destination_not_historical_alias(self, session_class):
+        result = self.result()
+        final = 'https://final.test/'
+        session = session_class.return_value.__enter__.return_value
+        session.request.side_effect = [response(301, headers={'Location': final}),
+                                       response(404), response()]
+        first = recheck_external(result)
+        second = recheck_external(first, workers=2)
+        self.assertEqual([call.args for call in session.request.call_args_list],
+                         [('HEAD', self.outside), ('HEAD', final), ('HEAD', final)])
+        self.assertEqual(second.nodes[self.outside], first.nodes[self.outside])
+        self.assertEqual([observation.http_status for observation in second.nodes[final].observations],
+                         [404, 200])
+        self.assertEqual(second.edges, {(self.root, final)})
+        self.assertEqual(second.settings, result.settings)
+        self.assertEqual(second.nodes[self.root], result.nodes[self.root])
+        self.assertIn('Broken targets: 0', summarize(second))
+
+    @patch('requests.sessions.Session.request', side_effect=AssertionError('unexpected network'))
+    def test_invalid_files_and_configuration_fail_before_network(self, request):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            source, options = directory / 'input.json', directory / 'options.txt'
+            write_json(self.result(), source)
+            output_args = ['--vis-file', str(directory / 'graph.html'),
+                           '--data-file', str(directory / 'crawl.pickle')]
+            for flags in (['--workers', '0'], ['--width', '-1'],
+                          ['--vis-file', str(directory / 'graph.txt')],
+                          ['--recheck-external'], ['--save-txt', '--save-npz'],
+                          ['--options', str(options)],
+                          ['--json-file', str(directory / 'absent' / 'crawl.json')],
+                          ['--show-buttons', '--options', str(options)]):
+                with self.subTest(flags=flags), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        self.cli(self.root, *output_args, *flags)
+            for invalid in ('not JSON', '[]', '{"physics": 5}', '{"physics": {"enabled": "yes"}}'):
+                options.write_text(invalid)
+                with self.subTest(options=invalid), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        self.cli(self.root, '--options', options, *output_args)
+            for flags in (['--visit-external'], ['--keep-queries'], [self.root],
+                          ['--vis-file', str(source)], ['--json-file', str(source)]):
+                with self.subTest(flags=flags), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        self.cli('--from-data-file', source, *output_args, *flags)
+            for invalid in ('{', '{"schema_version": 999}', '[]'):
+                source.write_text(invalid)
+                with self.subTest(data=invalid), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        self.cli('--from-data-file', source, '--recheck-external', *output_args)
+            for root in ('', 'ftp://example.org/', 'https://example.org:invalid/'):
+                with self.subTest(root=root), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        self.cli(root, *output_args)
+            request.assert_not_called()
+
+    def test_summary_does_not_conflate_discovery_http_and_fetch_failures(self):
+        result = self.result()
+        result.nodes[self.root].observations.append(
+            Observation('HEAD', 200, FetchError('timeout', 'body failed'), type='page')
+        )
+        text = summarize(result)
+        self.assertIn('Discovery: complete.', text)
+        self.assertIn('1 checked, 1 unchecked; 1 fetch failures', text)
+        self.assertIn('2xx=1', text)
+        self.assertIn('Broken targets: 1', text)
 
 
 if __name__ == '__main__':

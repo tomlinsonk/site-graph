@@ -2,11 +2,12 @@
 
 import json
 import os
+import pickle
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 from urllib.parse import urlsplit
 
 
@@ -50,6 +51,25 @@ class CrawlNode:
     scope: str
     alias_of: Optional[str] = None
     observations: list[Observation] = field(default_factory=list)
+    metadata_known: bool = True
+    legacy_error: Optional[Union[int, str]] = None
+    legacy_resource: bool = False
+
+    def error(self):
+        if not self.metadata_known:
+            return self.legacy_error
+        latest = self.observations[-1] if self.observations else None
+        if latest is not None:
+            if latest.fetch_error is not None:
+                return latest.fetch_error.message
+            if latest.http_status is not None and latest.http_status >= 400:
+                return latest.http_status
+        return None
+
+    def is_resource(self):
+        return self.legacy_resource if not self.metadata_known else (
+            bool(self.observations) and self.observations[-1].type == 'resource'
+        )
 
     def to_dict(self):
         latest = self.observations[-1] if self.observations else Observation('GET')
@@ -58,7 +78,8 @@ class CrawlNode:
             'scope': self.scope,
             'alias_of': self.alias_of,
             'type': latest.type,
-            'check_state': 'checked' if self.observations else 'unchecked',
+            'check_state': ('unknown' if not self.metadata_known else
+                            'checked' if self.observations else 'unchecked'),
             'http_status': latest.http_status,
             'fetch_error': asdict(latest.fetch_error) if latest.fetch_error else None,
             'observations': [asdict(observation) for observation in self.observations],
@@ -91,12 +112,13 @@ def discovery_summary(nodes):
 
 @dataclass
 class CrawlResult:
-    requested_root_url: str
+    requested_root_url: Optional[str]
     resolved_root_url: str
     settings: dict
     nodes: dict[str, CrawlNode] = field(default_factory=dict)
     edges: set[tuple[str, str]] = field(default_factory=set)
-    generated_at: str = field(default_factory=utc_now)
+    generated_at: Optional[str] = field(default_factory=utc_now)
+    is_legacy: bool = False
 
     def graph_nodes(self):
         return sorted(url for url, node in self.nodes.items() if node.alias_of is None)
@@ -105,16 +127,18 @@ class CrawlResult:
         errors = {}
         resources = set()
         for url in self.graph_nodes():
-            node = self.nodes[url].to_dict()
-            if node['fetch_error'] is not None:
-                errors[url] = node['fetch_error']['message']
-            elif node['http_status'] is not None and node['http_status'] >= 400:
-                errors[url] = node['http_status']
-            elif node['check_state'] == 'checked' and node['type'] != 'page':
+            node = self.nodes[url]
+            if node.error() is not None:
+                errors[url] = node.error()
+            elif node.is_resource() or (
+                    node.metadata_known and node.observations
+                    and node.observations[-1].type == 'unknown'):
                 resources.add(url)
         return self.edges, errors, resources, self.resolved_root_url
 
     def to_dict(self):
+        if self.is_legacy:
+            raise ValueError('Legacy pickle has unknown crawl metadata; JSON export requires v1 JSON or a new crawl')
         nodes = [self.nodes[url].to_dict() for url in sorted(self.nodes)]
         checked = sum(node['check_state'] == 'checked' for node in nodes)
         return {
@@ -128,6 +152,73 @@ class CrawlResult:
             'discovery': discovery_summary(nodes),
             'checking': {'checked': checked, 'unchecked': len(nodes) - checked},
         }
+
+
+def from_dict(data):
+    """Load validated v1 data without inferring or discarding observations."""
+    validate_crawl_data(data)
+    result = CrawlResult(data['requested_root_url'], data['resolved_root_url'],
+                         dict(data['settings']), generated_at=data['generated_at'])
+    for item in data['nodes']:
+        observations = []
+        for saved in item['observations']:
+            values = dict(saved)
+            if values['fetch_error'] is not None:
+                values['fetch_error'] = FetchError(**values['fetch_error'])
+            observations.append(Observation(**values))
+        result.nodes[item['id']] = CrawlNode(item['id'], item['scope'],
+                                            item['alias_of'], observations)
+    result.edges = {(edge['source'], edge['target']) for edge in data['edges']}
+    return result
+
+
+def from_legacy(data):
+    """Adapt a trusted old tuple for rendering, not as evidence of a crawl."""
+    if not isinstance(data, tuple) or len(data) != 4:
+        raise ValueError('Invalid legacy crawl data: expected (edges, errors, resources, root)')
+    edges, errors, resources, root = data
+    if not isinstance(edges, (set, list, tuple)) or not isinstance(errors, dict) or not isinstance(
+            resources, (set, list, tuple)):
+        raise ValueError('Invalid legacy crawl data: edges, errors or resources')
+    urls = [root, *errors, *resources]
+    for edge in edges:
+        if not isinstance(edge, (tuple, list)) or len(edge) != 2:
+            raise ValueError('Invalid legacy crawl data: directed edge pair required')
+        urls.extend(edge)
+    for url in urls:
+        try:
+            parts = urlsplit(url) if isinstance(url, str) else None
+            valid = parts is not None and parts.scheme in ('http', 'https') and parts.hostname
+            if valid:
+                parts.port
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError(f'Invalid legacy crawl data: URL {url!r}')
+    if any(not (type(error) is str or type(error) is int) for error in errors.values()):
+        raise ValueError('Invalid legacy crawl data: error value')
+    result = CrawlResult(None, root, {'visit_external': None, 'keep_queries': None, 'workers': None},
+                         generated_at=None, is_legacy=True)
+    result.edges = {tuple(edge) for edge in edges}
+    for url in urls:
+        result.nodes[url] = CrawlNode(
+            url, 'internal' if is_internal(url, root) else 'external',
+            metadata_known=False, legacy_error=errors.get(url), legacy_resource=url in resources,
+        )
+    return result
+
+
+def load_data(filename):
+    """Read JSON, or an explicitly named trusted .pickle/.pkl legacy file."""
+    path = Path(filename)
+    if path.suffix.lower() in ('.pickle', '.pkl'):
+        with path.open('rb') as source:
+            try:
+                return from_legacy(pickle.load(source))
+            except (pickle.UnpicklingError, EOFError, AttributeError, ImportError, IndexError) as error:
+                raise ValueError(f'Invalid legacy crawl data: {error}') from error
+    with path.open(encoding='utf-8') as source:
+        return from_dict(json.load(source))
 
 
 def validate_crawl_data(data):
