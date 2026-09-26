@@ -49,6 +49,8 @@ Blue nodes are internal pages, green nodes are internal resource files (anything
 
 Use `--visit-external` to check external links, with `--workers N` to visit N external sites in parallel (default: 4).
 
+Add `--json-file crawl.json` to also export [versioned crawl data](CRAWL_JSON.md); HTML and pickle defaults are unchanged.
+
 To see a graph of a local files, serve the files using a simple local HTTP server such as [Twisted](https://github.com/twisted/twisted) (in Python), usage: `twistd -no web --path=[path to files]`, or [http-server](https://github.com/http-party/http-server) (in Node.js), usage: `http-server [path to files]`, and use the resulting URL, for example: `python3 site_graph.py --force http://localhost:8080/`
 
 ## Contributing
