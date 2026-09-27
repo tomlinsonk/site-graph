@@ -4,8 +4,9 @@ import time
 import urllib.parse
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Optional
 
 import networkx as nx
@@ -15,24 +16,12 @@ import scipy
 from bs4 import BeautifulSoup
 from pyvis.network import Network
 
+from crawl_result import CrawlNode, CrawlResult, FetchError, Observation, is_internal, utc_now, write_json
+
 INTERNAL_COLOR = '#0072BB'
 EXTERNAL_COLOR = '#FF9F40'
 ERROR_COLOR = '#FF0800'
 RESOURCE_COLOR = '#2ECC71'
-
-
-def is_internal(url, site_url):
-    target = urllib.parse.urlsplit(url)
-    root = urllib.parse.urlsplit(site_url)
-
-    def origin(parts):
-        port = parts.port if parts.port is not None else (443 if parts.scheme == 'https' else 80)
-        return parts.scheme, parts.hostname, port
-
-    path = root.path.rstrip('/')
-    return origin(target) == origin(root) and (
-        target.path == path or target.path.startswith(path + '/')
-    )
 
 
 def resolve_url(href, base_url='', site_url=None, keep_queries=True):
@@ -95,25 +84,36 @@ class FetchResult:
     is_html: bool = False
     text: Optional[str] = None
     redirects: tuple = ()
+    observations: list[tuple[str, Observation]] = field(default_factory=list)
 
 
 def fetch(session, url, discover=False, site_url=None):
     result = FetchResult(url)
     method = 'GET' if discover else 'HEAD'
+
+    def fail(kind, message):
+        result.error = message
+        observation.fetch_error = FetchError(kind, message)
+
     try:
         while True:
+            observation = Observation(method)
+            result.observations.append((result.url, observation))
+            result.status = None
             with request_with_retries(session, method, result.url) as response:
                 result.status = response.status_code
+                observation.http_status = result.status
                 if method == 'HEAD' and result.status in (405, 501):
                     method = 'GET'
                     continue
                 if response.is_redirect:
                     target = resolve_url(response.headers['Location'], result.url)
                     if target is None:
-                        result.error = 'Invalid or unsupported redirect destination'
+                        fail('redirect', 'Invalid or unsupported redirect destination')
                         return result
+                    observation.redirect_to = target
                     if len(result.redirects) >= 10:
-                        result.error = 'Redirect limit exceeded'
+                        fail('redirect', 'Redirect limit exceeded')
                         return result
                     result.redirects += ((result.url, target),)
                     result.url = target
@@ -123,16 +123,20 @@ def fetch(session, url, discover=False, site_url=None):
                     ) else 'HEAD'
                     continue
                 if 300 <= result.status < 400:
-                    result.error = 'Redirect response without a usable destination'
+                    fail('redirect', 'Redirect response without a usable destination')
                 content_type = response.headers.get('Content-Type', '').split(';')[0].strip().lower()
                 result.is_html = content_type in ('text/html', 'application/xhtml+xml')
+                observation.type = 'page' if result.is_html else ('resource' if content_type else 'unknown')
                 if discover and result.is_html and 200 <= result.status < 300 and (
                     site_url is None or is_internal(result.url, site_url)
                 ):
                     result.text = response.text
+                    observation.discovered = True
                 return result
     except requests.exceptions.RequestException as error:
-        result.error = f'{type(error).__name__}: {error}'
+        kind = ('timeout' if isinstance(error, requests.exceptions.Timeout) else
+                'connection' if isinstance(error, requests.exceptions.ConnectionError) else 'request')
+        fail(kind, f'{type(error).__name__}: {error}')
         return result
 
 
@@ -154,43 +158,52 @@ def check_external_batch(urls):
 
 
 def crawl(url, visit_external, keep_queries, workers=4):
+    """Compatibility API for callers expecting the original four-item tuple."""
+    return crawl_site(url, visit_external, keep_queries, workers).legacy_data()
+
+
+def crawl_site(url, visit_external, keep_queries, workers=4, *, generated_at=None):
     if workers < 1:
         raise ValueError('workers must be at least 1')
     url = resolve_url(url)
     if url is None:
         raise ValueError('site URL must be an absolute HTTP or HTTPS URL')
     visited = set()
-    edges = set()
-    resource_pages = set()
-    error_codes = dict()
+    result = CrawlResult(url, url, {
+        'visit_external': visit_external, 'keep_queries': keep_queries, 'workers': workers,
+    })
     aliases = {}
     external_targets = set()
 
-    def record(result):
+    def node(url):
+        if url not in result.nodes:
+            result.nodes[url] = CrawlNode(url, 'internal' if is_internal(url, site_url) else 'external')
+        return result.nodes[url]
+
+    def record(page):
+        for observed_url, observation in page.observations:
+            node(observed_url).observations.append(observation)
+            if observation.redirect_to is not None:
+                node(observation.redirect_to)
         # A cookie-setting redirect can legitimately return to an earlier URL.
-        aliases.pop(result.url, None)
-        for source, _ in result.redirects:
-            if source != result.url:
-                aliases[source] = result.url
-                error_codes.pop(source, None)
-                resource_pages.discard(source)
+        aliases.pop(page.url, None)
+        for source, _ in page.redirects:
+            if source != page.url:
+                aliases[source] = page.url
             visited.add(source)
-        visited.add(result.url)
-        resource_pages.discard(result.url)
-        error = result.error or (result.status if result.status >= 400 else None)
+        visited.add(page.url)
+        error = page.error or (page.status if page.status is not None and page.status >= 400 else None)
         if error is not None:
-            error_codes[result.url] = error
-            print(f'{error} ERROR while visiting {result.url}')
-        else:
-            error_codes.pop(result.url, None)
-            if not result.is_html:
-                resource_pages.add(result.url)
+            print(f'{error} ERROR while visiting {page.url}')
 
     with requests.Session() as session:
         root = fetch(session, url, discover=True)
         if root.error or root.status >= 400 or root.text is None:
             raise ValueError(f'Cannot crawl root {root.url}: {root.error or root.status} (HTML required)')
         site_url = root.url
+        result.resolved_root_url = site_url
+        node(result.requested_root_url)
+        node(site_url)
         to_visit = deque([site_url])
         scheduled = {site_url}
 
@@ -210,7 +223,8 @@ def crawl(url, visit_external, keep_queries, workers=4):
                 target = resolve_url(link['href'], base_url, site_url, keep_queries)
                 if target is None:
                     continue
-                edges.add((page.url, target))
+                node(target)
+                result.edges.add((page.url, target))
                 target = canonical_url(target, aliases)
                 if is_internal(target, site_url):
                     if target not in scheduled and target not in visited:
@@ -226,14 +240,16 @@ def crawl(url, visit_external, keep_queries, workers=4):
             batches = [targets[index::count] for index in range(count)]
             with ThreadPoolExecutor(max_workers=count) as executor:
                 for results in executor.map(check_external_batch, batches):
-                    for result in results:
-                        record(result)
+                    for page in results:
+                        record(page)
 
-    edges = {(canonical_url(source, aliases), canonical_url(target, aliases))
-             for source, target in edges}
-    error_codes = {canonical_url(url, aliases): error for url, error in error_codes.items()}
-    resource_pages = {canonical_url(url, aliases) for url in resource_pages}
-    return edges, error_codes, resource_pages, site_url
+    result.edges = {(canonical_url(source, aliases), canonical_url(target, aliases))
+                    for source, target in result.edges}
+    for url, item in result.nodes.items():
+        canonical = canonical_url(url, aliases)
+        item.alias_of = canonical if canonical != url else None
+    result.generated_at = generated_at if generated_at is not None else utc_now()
+    return result
 
 
 def get_node_info(nodes, error_codes, resource_pages, args):
@@ -250,9 +266,11 @@ def get_node_info(nodes, error_codes, resource_pages, args):
     return node_info
 
 
-def visualize(edges, error_codes, resource_pages, args):
+def visualize(edges, error_codes, resource_pages, args, nodes=None):
     G = nx.DiGraph()
     G.add_node(args.site_url)
+    if nodes is not None:
+        G.add_nodes_from(nodes)
     G.add_edges_from(edges)
 
     if args.save_txt is not None or args.save_npz is not None:
@@ -317,6 +335,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--vis-file', type=str, help=f'filename in which to save HTML graph visualization (default: {vis_file})', default=vis_file)
     parser.add_argument('--data-file', type=str, help=f'filename in which to save crawled graph data (default: {data_file})', default=data_file)
+    parser.add_argument('--json-file', type=str, help='also save versioned crawl JSON to this file')
     parser.add_argument('--width', type=int, help=f'width of graph visualization in pixels (default: {width})', default=width)
     parser.add_argument('--height', type=int, help=f'height of graph visualization in pixels (default: {height})', default=height)
     parser.add_argument('--visit-external', action='store_true', help='detect broken external links (slower)')
@@ -333,7 +352,21 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.workers < 1:
         parser.error('--workers must be at least 1')
+    if args.json_file is not None and args.from_data_file is not None:
+        parser.error('--json-file requires a new crawl; legacy pickle lacks fetch observations')
+    if args.json_file is not None:
+        outputs = [args.data_file, args.vis_file]
+        if args.options is not None:
+            outputs.append(args.options)
+        if args.save_npz is not None:
+            matrix_file = args.save_npz if args.save_npz.endswith('.npz') else args.save_npz + '.npz'
+            outputs += [matrix_file, args.save_npz.replace('.npz', '') + '_nodes.txt']
+        elif args.save_txt is not None:
+            outputs += [args.save_txt, args.save_txt.replace('.txt', '') + '_nodes.txt']
+        if Path(args.json_file).resolve() in {Path(output).resolve() for output in outputs}:
+            parser.error('--json-file must differ from other input/output files')
 
+    nodes = None
     if args.from_data_file is None:
         site_url = resolve_url(args.site_url)
         if site_url is None:
@@ -344,11 +377,18 @@ if __name__ == '__main__':
                 exit(1)
 
         try:
-            edges, error_codes, resource_pages, args.site_url = crawl(
+            result = crawl_site(
                 site_url, args.visit_external, args.keep_queries, args.workers
             )
+            edges, error_codes, resource_pages, args.site_url = result.legacy_data()
+            nodes = result.graph_nodes()
+            if args.json_file is not None:
+                write_json(result, args.json_file)
+                print(f'Saved crawl JSON to {args.json_file}')
         except ValueError as error:
             parser.exit(1, f'Error: {error}\n')
+        except OSError as error:
+            parser.exit(1, f'Error saving crawl JSON: {error}\n')
         print('Crawl complete.')
 
         with open(args.data_file, 'wb') as f:
@@ -359,5 +399,5 @@ if __name__ == '__main__':
             edges, error_codes, resource_pages, site_url = pickle.load(f)
             args.site_url = site_url
 
-    visualize(edges, error_codes, resource_pages, args)
+    visualize(edges, error_codes, resource_pages, args, nodes=nodes)
     print('Saved graph to', args.vis_file)
