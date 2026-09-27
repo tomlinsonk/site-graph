@@ -840,10 +840,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   const check = (value, message) => { if (!value) throw Error(message); };
   try {
     graphDocument.querySelector("#regression-check").remove();
-    await new Promise(resolve => {
-      if (network.physics.options.enabled) network.once("stabilizationIterationsDone", resolve);
-      else requestAnimationFrame(resolve);
-    });
     const physics = document.getElementById("graph-physics");
     check(physics.checked === network.physics.options.enabled, "Physics toggle matches startup options");
     const initial = JSON.parse(document.getElementById("graph-data").textContent);
@@ -853,11 +849,14 @@ document.addEventListener("DOMContentLoaded", async () => {
         return position.x === node.x && position.y === node.y;
       }), "Reopening preserves every position without another layout");
       check(edges.getIds().join() === initial.edges.map(edge => edge.id).join(), "Edge IDs retained");
-      check(!physics.checked, "Saved layout starts paused");
+      check(physics.checked === initial.options.physics.enabled, "Saved physics setting restored");
+      check(!network.physics.options.stabilization.enabled, "Saved layout skips initial stabilization");
     } else {
+      await new Promise(resolve => network.once("stabilizationIterationsDone", resolve));
       check(physics.checked, "Fresh graphs keep physics on after initial stabilization");
-      physics.click();
     }
+    if (physics.checked) physics.click();
+    await new Promise(resolve => requestAnimationFrame(resolve));
     check(!network.physics.options.enabled, "Physics can be paused");
     check(!document.querySelector('script[src^="lib/"]'), "No relative runtime assets");
     check(document.querySelectorAll("#graph-layout").length === 1, "No duplicated layout controls");
@@ -904,19 +903,22 @@ document.addEventListener("DOMContentLoaded", async () => {
     HTMLAnchorElement.prototype.click = function() {
       check(this.download === "graph-layout.html", "HTML download filename");
     };
+    if (SAVE_PHYSICS) physics.click();
+    const savedPositions = network.getPositions(nodes.getIds());
     document.getElementById("graph-save").click();
     const savedHTML = await blob.text();
     const saved = JSON.parse(new DOMParser().parseFromString(savedHTML, "text/html")
       .getElementById("graph-data").textContent);
     check(saved.nodes.length === nodes.length && saved.edges.length === edges.length, "Complete graph");
     check(saved.nodes.every(node => {
-      const position = network.getPosition(node.id);
+      const position = savedPositions[node.id];
       return node.x === position.x && node.y === position.y && !node.hidden && !node.opacity &&
         node.label === "";
     }), "Every coordinate saved, even filtered nodes; no transient node styles");
     check(saved.edges.every(edge => !edge.hidden && edge.width === 1), "No transient edge styles");
-    check(saved.options.physics.enabled === false && saved.options.layout.improvedLayout === false,
-      "Saved layout does not recalculate");
+    check(saved.options.physics.enabled === SAVE_PHYSICS, "Saving preserves the chosen physics state");
+    check(saved.options.physics.stabilization.enabled === false &&
+      saved.options.layout.improvedLayout === false, "Saved layout skips initial calculation");
     check(saved.options.edges.arrows.to.scaleFactor === 0.8 &&
       saved.options.interaction.hideEdgesOnDrag, "Drawing changes retained");
     check(!window.injected, "Script-like URL/error text stays inert");
@@ -938,7 +940,8 @@ document.addEventListener("DOMContentLoaded", async () => {
             document, original_nodes, _ = self.render(result, interactive, show_buttons=True)
             for cycle in range(3):
                 with self.subTest(interactive=interactive, cycle=cycle):
-                    report = json.loads(self.browser_report(document, checks))
+                    script = checks.replace('SAVE_PHYSICS', json.dumps(cycle % 2 == 0))
+                    report = json.loads(self.browser_report(document, script))
                     self.assertNotIn('error', report, report.get('error'))
                     document = report['html']
                     data = json.loads(BeautifulSoup(document, 'html.parser').find(id='graph-data').string)

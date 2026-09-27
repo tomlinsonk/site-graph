@@ -46,7 +46,7 @@ Run `python3 site_graph.py -h` for all options.
 
 Once the graph settles, click **Save layout**. Reopen or publish the downloaded `graph-layout.html` to skip layout calculation next time.
 It keeps all nodes and drawing settings, not filters or selections, and still needs internet access.
-Use **Physics** to pause or resume motion.
+Use **Physics** to pause or resume motion; saving keeps your choice.
 
 ### Saved crawls
 

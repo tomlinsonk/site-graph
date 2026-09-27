@@ -39,7 +39,7 @@
     Physics <input id="graph-physics" type="checkbox" role="switch">
   </label>
   <button id="graph-save" type="button">Save layout</button>
-  <span>Download HTML with the current positions and physics off for faster reopening.</span>
+  <span>Download HTML with the current positions for faster reopening.</span>
   <span id="graph-save-status" role="status"></span>
 </div>
 <script>
@@ -77,7 +77,9 @@ document.addEventListener("DOMContentLoaded", () => {
       const saved = structuredClone(graphData);
       const positions = network.getPositions(nodes.getIds());
       saved.nodes = saved.nodes.map(node => ({...node, ...positions[node.id]}));
-      saved.options.physics = {...saved.options.physics, enabled: false};
+      saved.options.physics = {...saved.options.physics, stabilization: {
+        ...saved.options.physics?.stabilization, enabled: false
+      }};
       saved.options.layout = {...saved.options.layout, improvedLayout: false, hierarchical: false};
       const documentCopy = graphDocument.cloneNode(true);
       // Raw-text script elements need escaping even when their type is application/json.
