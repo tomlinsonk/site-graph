@@ -48,6 +48,7 @@
   </fieldset>
   <button id="graph-reset" type="button">Reset filters</button>
   <button id="graph-clear" type="button">Clear selection</button>
+  <p>Error filters keep referring pages and their upstream internal paths as context, even if those pages do not match the target/health filters.</p>
   <div id="graph-legend" aria-label="Legend">
     <span style="color:#0072BB">Blue: internal</span>
     <span style="color:#198b4a">Green: internal resource</span>
@@ -70,6 +71,11 @@
   const originalNodes = nodes.get();
   const originalEdges = edges.get();
   const byId = new Map(originalNodes.map(node => [node.id, node]));
+  const referrers = new Map();
+  for (const edge of originalEdges) {
+    if (!referrers.has(edge.to)) referrers.set(edge.to, []);
+    referrers.get(edge.to).push(edge.from);
+  }
   const controls = ["internal", "resource", "external", "state", "error"].map(get);
   let selected = null;
   let visible = new Set();
@@ -105,6 +111,29 @@
 
   function render() {
     visible = new Set(originalNodes.filter(allowed).map(node => node.id));
+    const matchCount = visible.size;
+    const error = get("error").value;
+    if (error !== "all" && error !== "none") {
+      const pending = [];
+      // Direct referrers may be external; traversal beyond them stays internal.
+      for (const id of Array.from(visible)) {
+        for (const source of referrers.get(id) ?? []) {
+          visible.add(source);
+          pending.push(source);
+        }
+      }
+      const visited = new Set();
+      while (pending.length) {
+        const id = pending.pop();
+        if (visited.has(id)) continue;
+        visited.add(id);
+        for (const source of referrers.get(id) ?? []) {
+          if (byId.get(source).crawl.scope !== "internal") continue;
+          visible.add(source);
+          pending.push(source);
+        }
+      }
+    }
     if (!visible.has(selected)) selected = null;
     const incoming = new Set();
     const outgoing = new Set();
@@ -134,6 +163,8 @@
     }));
     network.selectNodes(selected === null ? [] : [selected], false);
     get("status").textContent = visible.size + " / " + originalNodes.length + " targets visible." +
+      (visible.size > matchCount ? " " + matchCount + " matches, " +
+        (visible.size - matchCount) + " context pages." : "") +
       (selected === null ? " No selection." :
         " Selection: " + incoming.size + " incoming, " + outgoing.size + " outgoing visible neighbors.");
     get("detail").textContent = selected === null ? "" :

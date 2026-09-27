@@ -373,6 +373,12 @@ def prepare_graph_template(net, interactive):
     )
     template = net.templateEnv.loader.get_source(net.templateEnv, net.path)[0]
     template = template.replace('{{options|safe}}', '{{options|script_safe|safe}}')
+    # Replace PyVis's page-positioned loading CSS, markup and event handlers.
+    template = template.replace(
+        '{% if nodes|length > 100 and physics_enabled %}', '{% if false %}',
+    )
+    layout = Path(__file__).with_name('graph_layout.html').read_text(encoding='utf-8')
+    template = template.replace('</body>', layout + '\n</body>')
     if interactive:
         controls = Path(__file__).with_name('interactive_controls.html').read_text(encoding='utf-8')
         template = template.replace('</body>', controls + '\n</body>')
@@ -402,7 +408,7 @@ def visualize(result, args):
         with open(base_fname + '_nodes.txt', 'w') as f:
             f.write('\n'.join([nodes[i] + '\t' + node_info[i] for i in range(len(nodes))]))
 
-    net = Network(width=args.width, height=args.height, directed=True)
+    net = Network(width=f'{args.width}px', height=f'{args.height}px', directed=True)
     net.from_nx(G)
 
     if args.show_buttons:
@@ -448,9 +454,16 @@ def visualize(result, args):
 
 
 def summarize(result):
-    nodes = [result.nodes[url] for url in result.graph_nodes()]
-    lines = [f'Graph: {len(nodes)} canonical nodes, {len(result.edges)} directed edges, '
-             f'{len(result.nodes) - len(nodes)} aliases.']
+    nodes = [result.nodes[url] for url in sorted(result.nodes)
+             if result.nodes[url].alias_of is None]
+    aliases = sum(node.alias_of is not None for node in result.nodes.values())
+    graph_nodes = set(result.graph_nodes())
+    observation_only = sum(node.id not in graph_nodes for node in nodes)
+    lines = [f'Graph: {len(graph_nodes)} canonical nodes, {len(result.edges)} directed edges, '
+             f'{aliases} aliases.']
+    if observation_only:
+        lines.append(f'JSON only: {observation_only} unfollowed redirect destinations '
+                     '(not linked or checked).')
     if result.is_legacy:
         lines.append('Discovery: unknown (legacy pickle). HTTP health and check coverage: unknown.')
     else:

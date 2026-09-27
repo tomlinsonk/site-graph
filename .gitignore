@@ -1,6 +1,7 @@
 *.pickle
 *.html
 !interactive_controls.html
+!graph_layout.html
 __pycache__/
 .DS_Store
 lib/
