@@ -1,0 +1,40 @@
+<style>
+  #mynetwork { max-width: 100%; box-sizing: border-box; }
+  #mynetwork #loadingBar {
+    position: absolute; inset: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(200, 200, 200, .8);
+  }
+  #mynetwork #loadingBar[hidden] { display: none; }
+  #loadingBar .graph-loading-progress {
+    display: flex; align-items: center; gap: .75rem;
+    width: min(600px, 90%); padding: .5rem; box-sizing: border-box;
+    background: #fcfcfc; border: 8px solid rgba(0, 0, 0, .1); border-radius: 2rem;
+  }
+  #loadingBar progress { flex: 1; min-width: 0; width: 0; }
+  #loadingBar output { font: 18px system-ui, sans-serif; color: #000; }
+</style>
+<script>
+(() => {
+  "use strict";
+  // Start hidden: disabled physics/stabilization and empty graphs may emit no progress.
+  const overlay = document.createElement("div");
+  overlay.id = "loadingBar";
+  overlay.hidden = true;
+  overlay.innerHTML = '<div class="graph-loading-progress">' +
+    '<progress max="1" value="0" aria-label="Graph layout progress"></progress>' +
+    '<output>0%</output></div>';
+  document.getElementById("mynetwork").append(overlay);
+  const bar = overlay.querySelector("progress");
+  const label = overlay.querySelector("output");
+  network.on("stabilizationProgress", event => {
+    const fraction = event.total > 0 ? Math.min(1, Math.max(0, event.iterations / event.total)) : 1;
+    bar.value = fraction;
+    label.textContent = Math.round(fraction * 100) + "%";
+    overlay.hidden = false;
+  });
+  const hide = () => { overlay.hidden = true; };
+  network.on("stabilizationIterationsDone", hide);
+  network.on("stabilized", hide);
+})();
+</script>

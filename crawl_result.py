@@ -121,7 +121,17 @@ class CrawlResult:
     is_legacy: bool = False
 
     def graph_nodes(self):
-        return sorted(url for url, node in self.nodes.items() if node.alias_of is None)
+        endpoints = {url for edge in self.edges for url in edge}
+        redirect_targets = {
+            observation.redirect_to for node in self.nodes.values()
+            for observation in node.observations if observation.redirect_to is not None
+        }
+        # A redirect limit can record a destination that was never requested or linked.
+        return sorted(url for url, node in self.nodes.items()
+                      if url == self.resolved_root_url or (
+                          node.alias_of is None and (
+                              node.observations or url in endpoints or url not in redirect_targets
+                          )))
 
     def legacy_data(self):
         errors = {}

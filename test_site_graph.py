@@ -5,11 +5,14 @@ import json
 import pickle
 import re
 import runpy
+import shutil
+import subprocess
 import tempfile
 import unittest
 from collections import Counter
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event, Thread
 from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
@@ -711,6 +714,206 @@ class GraphControlsTests(unittest.TestCase):
         nodes = json.loads(re.search(r'nodes = new vis.DataSet\((.*?)\);', document, re.S)[1])
         edges = json.loads(re.search(r'edges = new vis.DataSet\((.*?)\);', document, re.S)[1])
         return document, {node['id']: node for node in nodes}, edges
+
+    @patch('site_graph.requests.Session')
+    def test_unfollowed_redirect_is_json_evidence_not_a_graph_singleton(self, session_class):
+        def request(method, url, **kwargs):
+            if url == self.root:
+                return response(body='<a href="https://outside.test/0">redirect chain</a>')
+            step = int(url.rsplit('/', 1)[1])
+            return response(302, headers={'Location': f'https://outside.test/{step + 1}'})
+
+        session_class.return_value.__enter__.return_value.request.side_effect = request
+        result = crawl_site(self.root, True, False)
+        unfollowed = 'https://outside.test/11'
+        failed = 'https://outside.test/10'
+        before = copy.deepcopy(result.to_dict())
+        validate_crawl_data(before)
+        self.assertEqual(result.nodes[unfollowed].observations, [])
+        self.assertIsNone(result.nodes[unfollowed].alias_of)
+        self.assertEqual(result.nodes[failed].observations[-1].fetch_error.kind, 'redirect')
+        self.assertEqual(result.edges, {(self.root, failed)})
+        result = from_dict(before)
+        for interactive in (False, True):
+            _, nodes, edges = self.render(result, interactive)
+            self.assertEqual(set(nodes), {self.root, failed})
+            self.assertEqual([(edge['from'], edge['to']) for edge in edges], [(self.root, failed)])
+        self.assertEqual(result.to_dict(), before)
+        self.assertIn('10 aliases.', summarize(result))
+        self.assertIn('1 unfollowed redirect destinations', summarize(result))
+        # Independently linked targets and disconnected observations are not intermediaries.
+        result.edges.add((self.root, unfollowed))
+        self.assertIn(unfollowed, result.graph_nodes())
+        result.edges.clear()
+        result.nodes[unfollowed].observations.append(Observation('HEAD', 200, type='page'))
+        disconnected = 'https://disconnected.test/'
+        result.nodes[disconnected] = CrawlNode(disconnected, 'external')
+        self.assertEqual(set(result.graph_nodes()), {self.root, failed, unfollowed, disconnected})
+
+    def test_context_filters_and_loading_geometry_in_browser(self):
+        chrome = shutil.which('chromium') or shutil.which('google-chrome')
+        if not chrome:
+            candidate = Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+            chrome = str(candidate) if candidate.is_file() else None
+        if not chrome:
+            self.skipTest('Chrome/Chromium required for browser regression')
+        result = self.result()
+        for name in ('section', 'referrer'):
+            result.nodes[self.root + name] = CrawlNode(self.root + name, 'internal', observations=[
+                Observation('GET', 200, type='page', discovered=True),
+            ])
+        broken, external_referrer = 'https://broken.test/', 'https://referrer.test/'
+        result.nodes[broken] = CrawlNode(broken, 'external', observations=[Observation('HEAD', 503)])
+        result.nodes[external_referrer] = CrawlNode(external_referrer, 'external')
+        result.edges.update({
+            (self.root, self.root + 'section'), (self.root + 'section', self.root + 'referrer'),
+            (self.root + 'referrer', self.root + 'section'), (self.root + 'referrer', broken),
+            (external_referrer, broken),
+        })
+        for index in range(101):
+            url = f'https://unrelated.test/{index}'
+            result.nodes[url] = CrawlNode(url, 'external')
+            result.edges.add((self.root, url))
+        checks = r"""
+<script>
+let failure = "";
+try {
+  const check = (value, message) => { if (!value) throw Error(message); };
+  const pane = document.getElementById("mynetwork");
+  const overlay = document.getElementById("loadingBar");
+  const equal = (a, b) => Math.abs(a - b) <= 2;
+  if (!network.physics.options.enabled || nodes.length === 1) {
+    check(overlay.hidden, "Overlay starts hidden even without stabilization events");
+  }
+  network.emit("stabilizationProgress", {iterations: 1, total: 2});
+  const box = pane.getBoundingClientRect(), cover = overlay.getBoundingClientRect();
+  const progress = overlay.firstElementChild.getBoundingClientRect();
+  check(equal(box.height, HEIGHT), "Requested height has CSS units");
+  check(equal(box.width, Math.min(WIDTH, pane.parentElement.clientWidth)),
+    "Requested width is bounded by viewport");
+  check(equal(box.x, cover.x) && equal(box.y, cover.y) &&
+    equal(box.width, cover.width) && equal(box.height, cover.height), "Overlay covers network only");
+  check(equal(progress.x + progress.width / 2, cover.x + cover.width / 2) &&
+    equal(progress.y + progress.height / 2, cover.y + cover.height / 2), "Progress centered in pane");
+  check(progress.width <= cover.width && overlay.querySelector("progress").value === .5,
+    "Responsive progress displays correct fraction");
+  network.emit("stabilizationIterationsDone");
+  check(overlay.hidden, "Completion hides overlay");
+  network.emit("stabilizationProgress", {iterations: 0, total: 0});
+  network.emit("stabilized");
+  check(overlay.hidden, "Early stabilization hides overlay");
+  const get = id => document.getElementById("graph-" + id);
+  if (get("controls") && nodes.length > 1) {
+    const change = (id, value) => {
+      const input = get(id);
+      if (input.type === "checkbox") input.checked = value; else input.value = value;
+      input.dispatchEvent(new Event("change"));
+    };
+    const root = "https://example.org/", broken = "https://broken.test/";
+    const positions = JSON.stringify(network.getPositions());
+    const styles = () => JSON.stringify(edges.get().map(edge => ({
+      color: network.body.edges[edge.id].options.color,
+      width: network.body.edges[edge.id].options.width
+    })));
+    const initialStyles = styles();
+    change("error", "5xx");
+    check([root, root + "section", root + "referrer", broken, "https://referrer.test/"]
+      .every(id => !nodes.get(id).hidden), "Error retains direct referrers, internal paths and root");
+    check(nodes.get("https://outside.test/").hidden &&
+      nodes.get("https://unrelated.test/0").hidden, "Traversal does not reveal unrelated external nodes");
+    check(!edges.get().find(edge => edge.from === root + "referrer" && edge.to === broken).hidden,
+      "Broken target's directed incoming edge remains visible");
+    check(nodes.get(broken).color === "#FF9F40", "Only-404 coloring does not change 5xx category");
+    change("internal", false);
+    change("state", "other-checked");
+    check(!nodes.get(root).hidden && !nodes.get(root + "referrer").hidden,
+      "Context bypasses target and health filters");
+    check(get("status").textContent.includes("1 matches, 4 context pages"), "Context counted separately");
+    network.emit("click", {nodes: [broken]});
+    check(get("status").textContent.includes("2 incoming, 0 outgoing"), "Referrers usable in selection");
+    check(edges.get().filter(edge => edge.to === broken).every(edge => edge.color.color === "#7b3294"),
+      "Selection highlights incoming edges");
+    change("error", "404");
+    check(network.getSelectedNodes().length === 0, "Hidden selection cleared");
+    get("search").value = "broken.test";
+    get("search").dispatchEvent(new Event("input"));
+    check(get("matches").options[1].textContent.startsWith("[hidden]"), "Search reflects visibility");
+    get("search").dispatchEvent(new KeyboardEvent("keydown", {key: "Enter"}));
+    check(get("error").value === "all" && network.getSelectedNodes()[0] === broken,
+      "Selecting hidden search match reveals it");
+    get("clear").click();
+    check(styles() === initialStyles, "Selection styles restored");
+    check(JSON.stringify(network.getPositions()) === positions, "Filters do not move nodes");
+    change("error", "any");
+    check(edges.get().every(edge => edge.hidden ||
+      (!nodes.get(edge.from).hidden && !nodes.get(edge.to).hidden)), "No dangling visible edges");
+  }
+  document.body.dataset.graphTest = "PASS";
+} catch (error) {
+  failure = error.stack;
+  document.body.dataset.graphTest = "FAIL";
+  document.body.append(error.stack);
+}
+fetch("/report", {method: "POST", body: failure || "PASS"});
+</script>
+"""
+        cases = [
+            (False, result, 1000, 800, {'options': read_options(Path(__file__).with_name('options.txt'))}),
+            (True, result, 720, 320, {'show_buttons': True}),
+            (True, result, 1000, 450, {'options': '{"physics":{"enabled":false}}'}),
+            (True, from_legacy((set(), {}, set(), self.root)), 240, 180,
+             {'options': '{"physics":{"enabled":false}}'}),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            for index, (interactive, data, width, height, options) in enumerate(cases):
+                with self.subTest(interactive=interactive, width=width, options=options):
+                    document, _, _ = self.render(data, interactive, width=width, height=height, **options)
+                    script = checks.replace('WIDTH', str(width)).replace('HEIGHT', str(height))
+                    # All vis assets are inline; omit unrelated Bootstrap CDN requests.
+                    document = re.sub(r'<(?:script|link)\b[^>]*(?:src|href)="https://[^>]+>'
+                                      r'(?:</script>)?', '', document)
+                    filename = Path(directory) / f'graph-{index}.html'
+                    filename.write_text(document.replace('</body>', script + '</body>'))
+                    finished, reports = Event(), []
+
+                    class Handler(BaseHTTPRequestHandler):
+                        def log_message(self, *args):
+                            pass
+
+                        def do_GET(self):
+                            self.send_response(200)
+                            self.send_header('Content-Type', 'text/html')
+                            self.end_headers()
+                            self.wfile.write(filename.read_bytes())
+
+                        def do_POST(self):
+                            reports.append(self.rfile.read(int(self.headers['Content-Length'])).decode())
+                            self.send_response(204)
+                            self.end_headers()
+                            finished.set()
+
+                    with HTTPServer(('127.0.0.1', 0), Handler) as server:
+                        thread = Thread(target=server.serve_forever)
+                        thread.start()
+                        try:
+                            with subprocess.Popen([
+                                chrome, '--headless', '--disable-gpu', '--no-first-run',
+                                '--window-size=900,1000', '--remote-debugging-port=0',
+                                f'--user-data-dir={directory}/profile-{index}',
+                                f'http://127.0.0.1:{server.server_port}/',
+                            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as browser:
+                                try:
+                                    self.assertTrue(finished.wait(30), 'Browser did not report results')
+                                    self.assertEqual(reports, ['PASS'])
+                                finally:
+                                    browser.terminate()
+                                    try:
+                                        browser.wait(timeout=5)
+                                    except subprocess.TimeoutExpired:
+                                        browser.kill()
+                        finally:
+                            server.shutdown()
+                            thread.join()
 
     def test_opt_in_preserves_graph_coloring_and_drawing_options(self):
         result = self.result()

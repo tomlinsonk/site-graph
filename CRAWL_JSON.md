@@ -46,7 +46,10 @@ unlinked pages, or a guarantee that the website remained unchanged.
 Python API: `site_graph.crawl_site(...)` returns `crawl_result.CrawlResult`;
 `to_dict()`, `validate_crawl_data(data)`, and `write_json(result, filename)` are
 the v1 serialization boundary. `generated_at=` on `crawl_site` accepts a fixed
-UTC timestamp for reproducibility. `graph_nodes()` excludes aliases;
+UTC timestamp for reproducibility. `graph_nodes()` excludes aliases and unfollowed
+redirect destinations with no observations or link edges (for example, beyond the
+redirect limit). These remain in JSON; isolated roots and other disconnected
+observations remain in the graph.
 `legacy_data()` and the existing `crawl(...)` API return the original
 `(edges, errors, resources, resolved_root)` tuple. Pickles retain that tuple,
 not the richer observations. No drawing settings, colors, or tooltips enter JSON.
