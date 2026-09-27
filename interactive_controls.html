@@ -28,7 +28,6 @@
       <option value="all">All states</option>
       <option value="success">Successful (2xx, no fetch failure)</option>
       <option value="unchecked">Unchecked</option>
-      <option value="unknown">Unknown (legacy)</option>
       <option value="other-checked">Other checked responses / failures</option>
     </select>
     <label for="graph-error">Error category</label>
@@ -43,7 +42,6 @@
       <option value="connection">Connection failure</option>
       <option value="redirect">Redirect failure</option>
       <option value="request">Other request failure</option>
-      <option value="legacy-error">Legacy error (unclassified)</option>
     </select>
   </fieldset>
   <button id="graph-reset" type="button">Reset filters</button>
@@ -54,7 +52,7 @@
     <span style="color:#198b4a">Green: internal resource</span>
     <span style="color:#ad5d0e">Orange: external</span>
     <span style="color:#cf0700">Red: errors (404 only with --only-404)</span>
-    <span>Triangle: unchecked; diamond: unknown legacy; other shapes: checked</span>
+    <span>Triangle: unchecked; other shapes: checked</span>
     <span style="color:#7b3294">Purple edges: incoming to selection</span>
     <span style="color:#007f73">Teal edges: outgoing from selection</span>
     <span style="color:#b21865">Pink edges: self-link (both directions)</span>
@@ -153,10 +151,10 @@
     edges.update(originalEdges.map(edge => {
       const into = selected !== null && edge.to === selected;
       const out = selected !== null && edge.from === selected;
+      const color = into && out ? "#b21865" : into ? "#7b3294" : "#007f73";
       return {
         id: edge.id, hidden: !visible.has(edge.from) || !visible.has(edge.to),
-        color: into || out ? {color: into && out ? "#b21865" : into ? "#7b3294" : "#007f73",
-          highlight: into && out ? "#b21865" : into ? "#7b3294" : "#007f73", inherit: false} :
+        color: into || out ? {color, highlight: color, inherit: false} :
           (edge.color ?? null),
         width: into || out ? 3 : (edge.width ?? null)
       };

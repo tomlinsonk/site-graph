@@ -9,11 +9,9 @@
 python3
 - bs4
 - pyvis
-- networkx
 - requests
-- scipy
 
-## Setup with Virtual Environment (recommended)
+## Setup
 
 ```
 git clone https://github.com/tomlinsonk/site-graph.git
@@ -23,39 +21,47 @@ source venv/bin/activate
 pip3 install -r requirements.txt
 ```
 
-To use the project in a new terminal session:
-```
-source venv/bin/activate
-```
-
-To deactivate the virtual environment:
-```
-deactivate
-```
-
 ## Running
-
-**After activating the virtual environment:**
 
 ```
 python3 site_graph.py https://www.kirantomlinson.com/
 ```
-To see site of interest for you, just change the URL.
+Replace the URL with the site you want to graph. This saves the visualization to `site.html` and the crawl data to `crawl.json`.
+Use `--vis-file` and `--json-file` to change the filenames.
 
-To see more options, run:
-```python3 site_graph.py -h```
+Blue nodes are internal pages, green nodes are internal resource files, orange nodes are external links, and red nodes have errors. Hover over a node to see its URL and any errors.
 
-Blue nodes are internal pages, green nodes are internal resource files (anything that isn't HTML), orange nodes are external pages, and red nodes are pages with errors. Hover over nodes to see URLs and specific errors (e.g. 404, 500, timeout).
+Add `--visit-external` to check external links. `--workers N` sets the number of parallel external checks (default: 4).
+Use `--only-404` to color only 404 errors red. Other errors are still shown on hover.
 
-Use `--visit-external` to check external links, with `--workers N` to visit N external sites in parallel (default: 4).
+Add `--interactive-controls` to search URLs, filter nodes, and highlight links to and from a selected node.
+Error filters also show the pages linking to those errors and the internal paths leading to them.
 
-Add `--json-file crawl.json` to also export [versioned crawl data](CRAWL_JSON.md); HTML and pickle defaults are unchanged.
-Rerender offline with `--from-data-file crawl.json`; add `--recheck-external --json-file checked.json` to check saved external targets and save the updates.
-Add `--interactive-controls` for client-side URL search, filters, a check-state legend, and directed neighbor highlighting.
-Error filters retain referring pages and upstream internal paths so broken links remain traceable; `--only-404` changes coloring, not filter categories.
-Legacy `.pickle`/`.pkl` files can also be rendered, but must be trusted (pickle can execute code); their missing crawl metadata is reported as unknown.
+Use `--show-buttons` to adjust the drawing settings in the browser. You can save the generated options to a file and load it with `--options`.
+Run `python3 site_graph.py -h` for all options.
 
-To see a graph of a local files, serve the files using a simple local HTTP server such as [Twisted](https://github.com/twisted/twisted) (in Python), usage: `twistd -no web --path=[path to files]`, or [http-server](https://github.com/http-party/http-server) (in Node.js), usage: `http-server [path to files]`, and use the resulting URL, for example: `python3 site_graph.py --force http://localhost:8080/`
+### Saved crawls
+
+To redraw a saved crawl without fetching the site again:
+```
+python3 site_graph.py --from-data-file crawl.json
+```
+
+The input file is left unchanged.
+
+### Local files
+
+Serve the files with `python3 -m http.server 8080 --directory PATH`, then run:
+```
+python3 site_graph.py http://localhost:8080/
+```
+
+## Files
+- `site_graph.py`: command-line interface
+- `crawler.py`: fetches pages and follows links
+- `crawl_result.py`: crawl data, JSON loading/saving, and summaries
+- `render.py`: creates the HTML graph using `graph_layout.html` and `interactive_controls.html`
 
 ## Contributing
+Run `python3 -m unittest` to run the tests. Browser tests use Chrome or Chromium.
 This code is under a MIT License. Feel free to make pull requests if there are some features you'd like included (or bugs you'd like fixed).
