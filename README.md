@@ -48,7 +48,6 @@ python3 site_graph.py --from-data-file crawl.json
 ```
 
 The input file is left unchanged.
-See [CRAWL_JSON.md](CRAWL_JSON.md) for the data format.
 
 ### Local files
 
