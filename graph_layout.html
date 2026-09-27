@@ -16,6 +16,7 @@
   #graph-layout { clear: both; padding: .75rem; font: 14px system-ui, sans-serif; }
 </style>
 <div id="graph-layout">
+  <label><input id="graph-physics" type="checkbox"> Physics</label>
   <button id="graph-save" type="button">Save layout</button>
   <span>Download HTML with the current positions and physics off for faster reopening.</span>
   <span id="graph-save-status" role="status"></span>
@@ -37,15 +38,17 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
   };
-  const freezeLayout = () => network.setOptions({physics: {enabled: false}});
+  const physics = document.getElementById("graph-physics");
+  physics.checked = graphData.options.physics?.enabled !== false;
+  physics.addEventListener("change", () => {
+    const changes = {physics: {enabled: physics.checked}};
+    mergeOptions(graphData.options, changes);
+    network.setOptions(changes);
+  });
   network.on("configChange", changes => {
     mergeOptions(graphData.options, changes);
-    if ("physics" in changes) network.off("stabilizationIterationsDone", freezeLayout);
+    physics.checked = graphData.options.physics?.enabled !== false;
   });
-  {% if freeze_layout %}
-  // Freeze only the default initial layout; explicit physics options stay in charge.
-  network.once("stabilizationIterationsDone", freezeLayout);
-  {% endif %}
   document.getElementById("graph-save").addEventListener("click", () => {
     const status = document.getElementById("graph-save-status");
     try {

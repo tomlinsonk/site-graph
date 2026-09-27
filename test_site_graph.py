@@ -764,8 +764,7 @@ fetch("/report", {method: "POST", body: failure || "PASS"});
                 document, _, _ = self.render(data, interactive, width=width, height=height, **options)
                 script = checks.replace('WIDTH', str(width)).replace('HEIGHT', str(height))
                 physics = json.loads(options.get('options', '{}')).get('physics', {})
-                script = script.replace('KEEP_PHYSICS', json.dumps(
-                    bool(physics) and physics.get('enabled', True)))
+                script = script.replace('KEEP_PHYSICS', json.dumps(physics.get('enabled', True)))
                 self.assertEqual(self.browser_report(document, script), 'PASS')
 
     def browser_report(self, document, script):
@@ -831,10 +830,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
     graphDocument.querySelector("#regression-check").remove();
     await new Promise(resolve => {
-      if (network.physics.options.enabled) network.once("stabilized", resolve);
+      if (network.physics.options.enabled) network.once("stabilizationIterationsDone", resolve);
       else requestAnimationFrame(resolve);
     });
-    check(!network.physics.options.enabled, "Default initial layout has a finite lifecycle");
+    const physics = document.getElementById("graph-physics");
+    check(physics.checked === network.physics.options.enabled, "Physics toggle matches startup options");
     const initial = JSON.parse(document.getElementById("graph-data").textContent);
     if (initial.nodes[0].x !== undefined) {
       check(initial.nodes.every(node => {
@@ -842,7 +842,12 @@ document.addEventListener("DOMContentLoaded", async () => {
         return position.x === node.x && position.y === node.y;
       }), "Reopening preserves every position without another layout");
       check(edges.getIds().join() === initial.edges.map(edge => edge.id).join(), "Edge IDs retained");
+      check(!physics.checked, "Saved layout starts paused");
+    } else {
+      check(physics.checked, "Fresh graphs keep physics on after initial stabilization");
+      physics.click();
     }
+    check(!network.physics.options.enabled, "Physics can be paused");
     check(!document.querySelector('script[src^="lib/"]'), "No relative runtime assets");
     check(document.querySelectorAll("#graph-layout").length === 1, "No duplicated layout controls");
     check(document.querySelectorAll("#loadingBar").length === 1, "No duplicated overlay");
@@ -861,6 +866,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     pointer(window, "pointermove", 50, 1);
     pointer(window, "pointerup", 50, 0);
     check(network.getPosition(root).x !== position.x, "Saved nodes remain draggable");
+    const paused = JSON.stringify(network.getPositions(nodes.getIds()));
+    physics.click();
+    check(network.physics.options.enabled, "Physics resumes with the toggle");
+    await new Promise(resolve => setTimeout(resolve, 150));
+    check(JSON.stringify(network.getPositions(nodes.getIds())) !== paused, "Resumed physics moves nodes");
+    check(document.getElementById("loadingBar").hidden, "Resume does not repeat hidden initial layout");
+    physics.click();
+    check(!network.physics.options.enabled, "Physics pauses again");
     const changes = {edges: {arrows: {to: {scaleFactor: 0.8}}}, interaction: {hideEdgesOnDrag: true}};
     network.setOptions(changes);
     network.emit("configChange", changes);

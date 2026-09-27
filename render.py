@@ -56,7 +56,7 @@ def exploration_info(item, aliases, generated_at):
     }
 
 
-def prepare_graph_template(net, interactive, freeze_layout):
+def prepare_graph_template(net, interactive):
     # PyVis already uses tojson for nodes/edges, but inserts options as raw JSON.
     net.templateEnv.filters['script_safe'] = lambda text: (
         text.replace('&', '\\u0026').replace('<', '\\u003c').replace('>', '\\u003e')
@@ -84,7 +84,6 @@ def prepare_graph_template(net, interactive, freeze_layout):
 {"nodes": {{nodes|tojson}}, "edges": {{edges|tojson}}, "options": {{options|script_safe|safe}}}
 </script>
 </body>''')
-    net.templateEnv.globals['freeze_layout'] = freeze_layout
     # Replace PyVis's page-positioned loading CSS, markup and event handlers.
     template = template.replace(
         '{% if nodes|length > 100 and physics_enabled %}', '{% if false %}',
@@ -102,7 +101,6 @@ def visualize(result, args):
     net = Network(width=f'{args.width}px', height=f'{args.height}px', directed=True,
                   cdn_resources='remote')
     net.options.edges.smooth.enabled = False
-    freeze_layout = True
     net.add_nodes(result.graph_nodes())
     for source, target in sorted(result.edges):
         net.add_edge(source, target, width=1)
@@ -111,7 +109,6 @@ def visualize(result, args):
     elif args.options is not None:
         options = json.loads(args.options)
         options.setdefault('edges', {}).setdefault('smooth', False)
-        freeze_layout = 'physics' not in options
         net.set_options(json.dumps(options))
 
     aliases = {}
@@ -137,7 +134,7 @@ def visualize(result, args):
             if info['state'] == 'unchecked':
                 node['shape'] = 'triangle'
 
-    prepare_graph_template(net, args.interactive_controls, freeze_layout)
+    prepare_graph_template(net, args.interactive_controls)
     net.save_graph(args.vis_file)
 
 
