@@ -11,7 +11,7 @@ python3
 - pyvis
 - requests
 
-## Setup with Virtual Environment (recommended)
+## Setup
 
 ```
 git clone https://github.com/tomlinsonk/site-graph.git
@@ -21,51 +21,52 @@ source venv/bin/activate
 pip3 install -r requirements.txt
 ```
 
-To use the project in a new terminal session:
-```
-source venv/bin/activate
-```
-
-To deactivate the virtual environment:
-```
-deactivate
-```
-
 ## Running
-
-**After activating the virtual environment:**
 
 ```
 python3 site_graph.py https://www.kirantomlinson.com/
 ```
-To see site of interest for you, just change the URL.
+Replace the URL with the site you want to graph. This saves the visualization to `site.html` and the crawl data to `crawl.json`.
+Use `--vis-file` and `--json-file` to change the filenames.
 
-To see more options, run:
-```python3 site_graph.py -h```
+Blue nodes are internal pages, green nodes are internal resource files, orange nodes are external links, and red nodes have errors. Hover over a node to see its URL and any errors.
 
-Blue nodes are internal pages, green nodes are internal resource files (anything that isn't HTML), orange nodes are external pages, and red nodes are pages with errors. Hover over nodes to see URLs and specific errors (e.g. 404, 500, timeout).
+Add `--visit-external` to check external links. `--workers N` sets the number of parallel external checks (default: 4).
+Use `--only-404` to color only 404 errors red. Other errors are still shown on hover.
 
-Use `--visit-external` to check external links, with `--workers N` to visit N external sites in parallel (default: 4).
+Add `--interactive-controls` to search URLs, filter nodes, and highlight links to and from a selected node.
+Error filters also show the pages linking to those errors and the internal paths leading to them.
 
-Each crawl saves `site.html` and [versioned crawl data](CRAWL_JSON.md) in `crawl.json`.
-Use `--vis-file` and `--json-file` to choose output paths.
-Rerender offline with `--from-data-file crawl.json`; add `--recheck-external --json-file checked.json` to check saved external targets and save the updates.
-Add `--interactive-controls` for client-side URL search, filters, a check-state legend, and directed neighbor highlighting.
-Error filters retain referring pages and upstream internal paths so broken links remain traceable.
-Use `--only-404` to highlight missing pages without coloring crawler-blocking 403s red;
-it changes coloring, not filter categories or recorded errors.
-JSON v1 is now the only saved format. Pickle support, `--data-file`, and the old
-tuple-returning Python API have been removed; existing v1 JSON files still work.
-Matrix exports (`--save-txt`, `--save-npz`) are also removed; JSON retains all nodes and edges.
+Use `--show-buttons` to adjust the drawing settings in the browser. You can save the generated options to a file and load it with `--options`.
+Run `python3 site_graph.py -h` for all options.
 
-HTTP and HTTPS URLs are both accepted; no `--force` override is needed.
-To graph local files, serve them with `python3 -m http.server 8080 --directory PATH`,
-then run `python3 site_graph.py http://localhost:8080/`.
+### Saved crawls
+
+To redraw a saved crawl without fetching the site again:
+```
+python3 site_graph.py --from-data-file crawl.json
+```
+
+To recheck its external links and save the updated data:
+```
+python3 site_graph.py --from-data-file crawl.json --recheck-external --json-file checked.json
+```
+Without `--json-file`, the recheck only updates the visualization. The input file is left unchanged.
+See [CRAWL_JSON.md](CRAWL_JSON.md) for the data format.
+
+### Local files
+
+Serve the files with `python3 -m http.server 8080 --directory PATH`, then run:
+```
+python3 site_graph.py http://localhost:8080/
+```
+
+## Files
+- `site_graph.py`: command-line interface
+- `crawler.py`: fetches pages and follows links
+- `crawl_result.py`: crawl data, JSON loading/saving, and summaries
+- `render.py`: creates the HTML graph using `graph_layout.html` and `interactive_controls.html`
 
 ## Contributing
-The code has four parts: `site_graph.py` (CLI), `crawler.py` (HTTP and discovery),
-`crawl_result.py` (model, JSON validation/storage, summaries), and `render.py`
-(HTML presentation). The two HTML fragments provide layout and optional controls.
-Run `python3 -m unittest` for the test suite; browser checks also run when Chrome/Chromium is available.
-
+Run `python3 -m unittest` to run the tests. Browser tests use Chrome or Chromium.
 This code is under a MIT License. Feel free to make pull requests if there are some features you'd like included (or bugs you'd like fixed).
