@@ -2,8 +2,7 @@
 
 Crawl data is saved to `crawl.json`, or the path given by `--json-file`.
 Use `--from-data-file crawl.json` to draw the graph without fetching any URLs.
-Add `--recheck-external` to check external links again and `--json-file checked.json`
-to save the updated data. Input/output paths must differ.
+Input/output paths must differ.
 
 Top-level fields:
 
@@ -59,12 +58,6 @@ observations remain in the graph.
 No drawing settings, colors, or tooltips enter JSON.
 
 `render.visualize(result, args)` draws the graph using the command-line options in `args`.
-
-`crawler.recheck_external(result, workers=None)` returns a copy with appended observations
-and updated edges/aliases. It checks each external link target once, using HEAD
-with a GET fallback. It follows redirects but does not discover new links.
-Roots, scope, query strings, discovery observations, and crawl settings stay the same;
-`generated_at` becomes the update time. Workers default to the saved setting.
 
 Console summaries count canonical nodes/edges, latest HTTP categories, unchecked
 targets and fetch failures separately from discovery completeness. Response and

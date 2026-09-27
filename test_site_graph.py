@@ -23,7 +23,7 @@ from crawl_result import (
     CrawlNode, CrawlResult, FetchError, Observation, from_dict, is_internal,
     load_data, summarize, validate_crawl_data, write_json,
 )
-from crawler import crawl_site, fetch, recheck_external, resolve_url
+from crawler import crawl_site, fetch, resolve_url
 from render import read_options, url_link, visualize
 from site_graph import main
 
@@ -308,6 +308,9 @@ class JsonTests(unittest.TestCase):
                              self.root + 'missing')
         self.assertEqual({(edge['source'], edge['target']) for edge in data['edges']},
                          result.edges)
+        summary = summarize(result)
+        self.assertIn(self.root + 'missing: 410', summary)
+        self.assertIn('Referred by: ' + self.root, summary)
         for name, kind in (('timeout', 'timeout'), ('offline', 'connection'), ('body', 'timeout')):
             self.assertEqual(nodes[self.root + name]['fetch_error']['kind'], kind)
             self.assertEqual(nodes[self.root + name]['http_status'], 200 if name == 'body' else None)
@@ -429,7 +432,7 @@ class JsonTests(unittest.TestCase):
             with patch('sys.argv', [script, '--from-data-file', json_file, '--vis-file', vis_file]):
                 runpy.run_path(script, run_name='__main__')
             session.request.assert_not_called()
-            for flag in ('--data-file', '--force', '--save-txt', '--save-npz'):
+            for flag in ('--data-file', '--force', '--save-txt', '--save-npz', '--recheck-external'):
                 with self.subTest(removed=flag), patch('sys.argv', [script, flag]), \
                         contextlib.redirect_stderr(io.StringIO()):
                     with self.assertRaises(SystemExit) as error:
@@ -508,105 +511,6 @@ class SavedWorkflowTests(unittest.TestCase):
                 self.assertFalse(Path('crawl.json').exists())
             request.assert_not_called()
 
-    @patch('crawler.requests.Session')
-    def test_recheck_preserves_observations_aliases_discovery_and_referrers(self, session_class):
-        original = self.result()
-        alias, missing = 'https://old.test/', self.root + 'missing'
-        original.nodes[alias] = CrawlNode(alias, 'external', self.outside, [
-            Observation('HEAD', 301, redirect_to=self.outside),
-        ])
-        original.nodes[self.outside].observations = [
-            Observation('HEAD', fetch_error=FetchError('timeout', 'earlier timeout')),
-        ]
-        original.nodes[missing] = CrawlNode(missing, 'internal', observations=[
-            Observation('GET', 404, type='page'),
-        ])
-        original.edges.add((self.root, missing))
-        original.edges.add((self.root, self.root))
-        before = original.to_dict()
-        session = session_class.return_value.__enter__.return_value
-        session.request.side_effect = [
-            response(301, headers={'Location': self.root}),
-            response(405), response(503, headers={'Retry-After': '120'}),
-        ]
-        updated = recheck_external(from_dict(before))
-        self.assertEqual(original.to_dict(), before)
-        self.assertEqual(updated.requested_root_url, original.requested_root_url)
-        self.assertEqual(updated.resolved_root_url, original.resolved_root_url)
-        self.assertEqual(updated.settings, original.settings)
-        self.assertEqual(updated.nodes[alias].observations, original.nodes[alias].observations)
-        self.assertEqual(updated.nodes[alias].alias_of, self.root)
-        self.assertEqual(updated.nodes[self.outside].alias_of, self.root)
-        self.assertEqual(updated.nodes[self.outside].observations[0],
-                         original.nodes[self.outside].observations[0])
-        self.assertEqual(updated.nodes[self.root].observations[0], original.nodes[self.root].observations[0])
-        self.assertEqual(updated.nodes[missing], original.nodes[missing])
-        self.assertEqual(updated.edges, {(self.root, self.root), (self.root, missing)})
-        self.assertTrue(updated.to_dict()['discovery']['complete'])
-        self.assertEqual([call.args for call in session.request.call_args_list],
-                         [('HEAD', self.outside), ('HEAD', self.root), ('GET', self.root)])
-        text = summarize(updated)
-        self.assertIn('2 canonical nodes, 2 directed edges, 2 aliases', text)
-        self.assertIn('4xx=1, 5xx=1', text)
-        self.assertIn('Broken targets: 2', text)
-        self.assertIn('Referred by: ' + self.root, text)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'updated.json'
-            write_json(updated, path)
-            self.assertEqual(load_data(path).to_dict(), updated.to_dict())
-        session.request.reset_mock()
-        again = recheck_external(updated)
-        self.assertEqual(again.nodes, updated.nodes)
-        session.request.assert_not_called()
-
-    @patch('crawler.requests.Session')
-    def test_cli_recheck_is_explicit_and_output_is_opt_in(self, session_class):
-        result = self.result()
-        session = session_class.return_value.__enter__.return_value
-        new_internal = self.root + 'new?keep=identity'
-        session.request.side_effect = [
-            response(302, headers={'Location': new_internal}), response(),
-            response(404),
-        ]
-        with tempfile.TemporaryDirectory() as directory:
-            directory = Path(directory)
-            source, output = directory / 'input.json', directory / 'updated.json'
-            html = directory / 'graph.html'
-            write_json(result, source)
-            original = source.read_bytes()
-            with contextlib.chdir(directory):
-                text = self.cli('--from-data-file', source, '--recheck-external', '--vis-file', html)
-                self.assertFalse(Path('crawl.json').exists())
-            self.assertIn('updated in memory only', text)
-            self.assertIn('Discovery: incomplete (not_discovered=1)', text)
-            self.assertFalse(output.exists())
-            self.assertEqual(source.read_bytes(), original)
-            self.cli('--from-data-file', source, '--recheck-external', '--json-file', output,
-                     '--vis-file', html)
-            updated = load_data(output)
-            self.assertEqual(updated.nodes[self.outside].observations[-1].http_status, 404)
-            self.assertEqual(source.read_bytes(), original)
-            self.assertEqual(session.request.call_args_list[1].args, ('HEAD', new_internal))
-
-    @patch('crawler.requests.Session')
-    def test_recheck_reuses_canonical_destination_not_historical_alias(self, session_class):
-        result = self.result()
-        final = 'https://final.test/'
-        session = session_class.return_value.__enter__.return_value
-        session.request.side_effect = [response(301, headers={'Location': final}),
-                                       response(404), response()]
-        first = recheck_external(result)
-        second = recheck_external(first, workers=2)
-        self.assertEqual([call.args for call in session.request.call_args_list],
-                         [('HEAD', self.outside), ('HEAD', final), ('HEAD', final)])
-        self.assertEqual(second.nodes[self.outside], first.nodes[self.outside])
-        self.assertEqual([observation.http_status for observation in second.nodes[final].observations],
-                         [404, 200])
-        self.assertEqual(second.edges, {(self.root, final)})
-        self.assertEqual(second.settings, result.settings)
-        self.assertEqual(second.nodes[self.root], result.nodes[self.root])
-        self.assertIn('Broken targets: 0', summarize(second))
-
     @patch('requests.sessions.Session.request', side_effect=AssertionError('unexpected network'))
     def test_invalid_files_and_configuration_fail_before_network(self, request):
         with tempfile.TemporaryDirectory() as directory:
@@ -617,7 +521,6 @@ class SavedWorkflowTests(unittest.TestCase):
                            '--json-file', str(directory / 'crawl.json')]
             for flags in (['--workers', '0'], ['--width', '-1'],
                           ['--vis-file', str(directory / 'graph.txt')],
-                          ['--recheck-external'],
                           ['--options', str(options)],
                           ['--json-file', str(directory / 'absent' / 'crawl.json')],
                           ['--show-buttons', '--options', str(options)]):
@@ -629,7 +532,7 @@ class SavedWorkflowTests(unittest.TestCase):
                 with self.subTest(options=invalid), contextlib.redirect_stderr(io.StringIO()):
                     with self.assertRaises(SystemExit):
                         self.cli(self.root, '--options', options, *output_args)
-            for flags in (['--visit-external'], ['--keep-queries'], [self.root],
+            for flags in (['--visit-external'], ['--keep-queries'], ['--recheck-external'], [self.root],
                           ['--vis-file', str(source)], ['--json-file', str(source)]):
                 with self.subTest(flags=flags), contextlib.redirect_stderr(io.StringIO()):
                     with self.assertRaises(SystemExit):
@@ -638,7 +541,7 @@ class SavedWorkflowTests(unittest.TestCase):
                 source.write_text(invalid)
                 with self.subTest(data=invalid), contextlib.redirect_stderr(io.StringIO()):
                     with self.assertRaises(SystemExit):
-                        self.cli('--from-data-file', source, '--recheck-external', *output_args)
+                        self.cli('--from-data-file', source, *output_args)
             for root in ('', 'ftp://example.org/', 'https://example.org:invalid/'):
                 with self.subTest(root=root), contextlib.redirect_stderr(io.StringIO()):
                     with self.assertRaises(SystemExit):

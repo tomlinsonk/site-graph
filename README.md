@@ -47,11 +47,7 @@ To redraw a saved crawl without fetching the site again:
 python3 site_graph.py --from-data-file crawl.json
 ```
 
-To recheck its external links and save the updated data:
-```
-python3 site_graph.py --from-data-file crawl.json --recheck-external --json-file checked.json
-```
-Without `--json-file`, the recheck only updates the visualization. The input file is left unchanged.
+The input file is left unchanged.
 See [CRAWL_JSON.md](CRAWL_JSON.md) for the data format.
 
 ### Local files

@@ -1,6 +1,5 @@
-"""HTTP fetching, link discovery, and external rechecks."""
+"""HTTP fetching and link discovery."""
 
-import copy
 import time
 import urllib.parse
 from collections import deque
@@ -167,22 +166,6 @@ def canonicalize_result(result, aliases):
     for url, item in result.nodes.items():
         canonical = canonical_url(url, aliases)
         item.alias_of = canonical if canonical != url else None
-
-
-def recheck_external(result, workers=None):
-    """Check canonical external edge targets, retaining discovery/history in a copy."""
-    workers = result.settings['workers'] if workers is None else workers
-    if type(workers) is not int or workers < 1:
-        raise ValueError('workers must be at least 1')
-    updated = copy.deepcopy(result)
-    aliases = {url: node.alias_of for url, node in updated.nodes.items() if node.alias_of is not None}
-    targets = sorted({target for _, target in updated.edges
-                      if updated.nodes[target].scope == 'external'})
-    for page in check_external_targets(targets, workers):
-        record_fetch(updated, page, aliases)
-    canonicalize_result(updated, aliases)
-    updated.generated_at = utc_now()
-    return updated
 
 
 def crawl_site(url, visit_external=False, keep_queries=False, workers=4, *, generated_at=None):

@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from crawler import crawl_site, recheck_external, resolve_url
+from crawler import crawl_site, resolve_url
 from crawl_result import load_data, summarize, write_json
 from render import read_options, visualize
 
@@ -14,9 +14,8 @@ def main():
     parser.add_argument('--vis-file', default='site.html', help='HTML graph output (default: site.html)')
     parser.add_argument('--json-file', help='JSON output (default: crawl.json for a new crawl; none for saved data)')
     parser.add_argument('--from-data-file', help='render saved JSON without network requests')
-    parser.add_argument('--recheck-external', action='store_true', help='check saved external targets again (network)')
     parser.add_argument('--visit-external', action='store_true', help='detect broken external links (slower)')
-    parser.add_argument('--workers', type=int, help='parallel external checks (default: 4, or saved setting)')
+    parser.add_argument('--workers', type=int, default=4, help='parallel external checks (default: 4)')
     parser.add_argument('--keep-queries', action='store_true', help='keep internal query strings; always remove fragments')
     parser.add_argument('--width', type=int, default=1000, help='graph width in pixels (default: 1000)')
     parser.add_argument('--height', type=int, default=800, help='graph height in pixels (default: 800)')
@@ -26,7 +25,7 @@ def main():
     parser.add_argument('--only-404', action='store_true', help='only color 404 errors red')
     args = parser.parse_args()
 
-    if args.workers is not None and args.workers < 1:
+    if args.workers < 1:
         parser.error('--workers must be at least 1')
     if args.width < 1 or args.height < 1:
         parser.error('--width and --height must be positive')
@@ -34,10 +33,8 @@ def main():
         parser.error('--vis-file must end in .html')
     if args.show_buttons and args.options:
         parser.error('--show-buttons and --options cannot be combined')
-    if args.recheck_external and not args.from_data_file:
-        parser.error('--recheck-external requires --from-data-file')
     if args.from_data_file and (args.site_url or args.visit_external or args.keep_queries):
-        parser.error('saved data defines root/scope/query policy; use --recheck-external for network checks')
+        parser.error('--from-data-file cannot be combined with a site URL, --visit-external, or --keep-queries')
 
     if not args.from_data_file and args.json_file is None:
         args.json_file = 'crawl.json'
@@ -58,15 +55,11 @@ def main():
             args.options = read_options(args.options)
         if args.from_data_file:
             result = load_data(args.from_data_file)
-            if args.recheck_external:
-                result = recheck_external(result, args.workers)
-                if args.json_file is None:
-                    print('External checks updated in memory only; use --json-file to save them.')
         else:
             site_url = resolve_url(args.site_url)
             if site_url is None:
                 parser.error('site_url must be an absolute HTTP or HTTPS URL')
-            result = crawl_site(site_url, args.visit_external, args.keep_queries, args.workers or 4)
+            result = crawl_site(site_url, args.visit_external, args.keep_queries, args.workers)
         if args.json_file is not None:
             write_json(result, args.json_file)
             print(f'Saved crawl JSON to {args.json_file}')
