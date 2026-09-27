@@ -18,7 +18,6 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import requests
 from bs4 import BeautifulSoup
 from pyvis.network import Network
-from scipy import sparse
 
 from crawl_result import (
     CrawlNode, CrawlResult, FetchError, Observation, from_dict, is_internal,
@@ -200,13 +199,12 @@ class CrawlTests(unittest.TestCase):
         result = crawl_site(root)
         self.assertEqual(result.edges, set())
         self.assertEqual(result.resolved_root_url, root)
-        args = SimpleNamespace(site_url=root, save_txt=None, save_npz=None,
+        args = SimpleNamespace(site_url=root,
                                width=1000, height=800, show_buttons=False, options=None,
                                only_404=False, interactive_controls=False, vis_file='unused.html')
         with patch('render.Network') as network:
             visualize(result, args)
-            graph = network.return_value.from_nx.call_args.args[0]
-            self.assertEqual(set(graph.nodes), {root})
+            network.return_value.add_nodes.assert_called_once_with([root])
         for unusable in (response(404), response(headers={'Content-Type': 'application/pdf'})):
             session.request.return_value = unusable
             with self.assertRaisesRegex(ValueError, 'Cannot crawl root'):
@@ -431,15 +429,13 @@ class JsonTests(unittest.TestCase):
             with patch('sys.argv', [script, '--from-data-file', json_file, '--vis-file', vis_file]):
                 runpy.run_path(script, run_name='__main__')
             session.request.assert_not_called()
-            with patch('sys.argv', [script, '--data-file', 'obsolete.pickle']), \
-                    contextlib.redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit) as error:
-                    runpy.run_path(script, run_name='__main__')
-            self.assertEqual(error.exception.code, 2)
+            for flag in ('--data-file', '--force', '--save-txt', '--save-npz'):
+                with self.subTest(removed=flag), patch('sys.argv', [script, flag]), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as error:
+                        runpy.run_path(script, run_name='__main__')
+                    self.assertEqual(error.exception.code, 2)
             for extra, filename in (([], 'site.html'),
-                                    (['--save-txt', 'matrix.txt'], 'matrix.txt'),
-                                    (['--save-npz', 'matrix.npz'], 'matrix_nodes.txt'),
-                                    (['--save-npz', 'matrix'], 'matrix.npz'),
                                     (['--options', 'options.txt'], 'options.txt')):
                 with self.subTest(output_collision=filename):
                     with patch('sys.argv', [script, self.root, '--json-file', filename] + extra):
@@ -447,6 +443,19 @@ class JsonTests(unittest.TestCase):
                             runpy.run_path(script, run_name='__main__')
                     self.assertEqual(error.exception.code, 2)
                     session.request.assert_not_called()
+
+    @patch('site_graph.visualize')
+    @patch('crawler.requests.Session')
+    def test_cli_accepts_http_without_override(self, session_class, visualize):
+        root = 'http://localhost:8080/'
+        session = session_class.return_value.__enter__.return_value
+        session.request.return_value = response()
+        with tempfile.TemporaryDirectory() as directory, contextlib.chdir(directory), \
+                patch('sys.argv', ['site_graph.py', root]):
+            main()
+            self.assertEqual(load_data('crawl.json').resolved_root_url, root)
+        self.assertEqual(session.request.call_args.args, ('GET', root))
+        visualize.assert_called_once()
 
 
 class SavedWorkflowTests(unittest.TestCase):
@@ -480,27 +489,23 @@ class SavedWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
             source, exported = directory / 'input.json', directory / 'copy.json'
-            html, matrix = directory / 'graph.html', directory / 'matrix.txt'
+            html = directory / 'graph.html'
             options = directory / 'options.txt'
             options.write_text('var options = {"physics": false};')
             write_json(result, source)
             original = source.read_bytes()
             output = self.cli('--from-data-file', source, '--json-file', exported,
-                              '--vis-file', html, '--save-txt', matrix, '--options', options)
+                              '--vis-file', html, '--options', options)
             self.assertEqual(load_data(exported).to_dict(), result.to_dict())
             self.assertEqual(source.read_bytes(), original)
             self.assertTrue(html.is_file())
             self.assertIn(self.root, html.read_text())
             self.assertIn('"enabled": false', html.read_text())
-            self.assertEqual(matrix.read_text().strip(), '0 1\n0 0')
-            self.assertIn(self.outside, (directory / 'matrix_nodes.txt').read_text())
             self.assertIn('1 checked, 1 unchecked', output)
             self.assertIn('Discovery: complete.', output)
             with contextlib.chdir(directory):
-                self.cli('--from-data-file', source, '--vis-file', html, '--save-npz', 'matrix')
+                self.cli('--from-data-file', source, '--vis-file', html)
                 self.assertFalse(Path('crawl.json').exists())
-            self.assertEqual(sparse.load_npz(directory / 'matrix.npz').toarray().tolist(),
-                             [[0, 1], [0, 0]])
             request.assert_not_called()
 
     @patch('crawler.requests.Session')
@@ -612,7 +617,7 @@ class SavedWorkflowTests(unittest.TestCase):
                            '--json-file', str(directory / 'crawl.json')]
             for flags in (['--workers', '0'], ['--width', '-1'],
                           ['--vis-file', str(directory / 'graph.txt')],
-                          ['--recheck-external'], ['--save-txt', '--save-npz'],
+                          ['--recheck-external'],
                           ['--options', str(options)],
                           ['--json-file', str(directory / 'absent' / 'crawl.json')],
                           ['--show-buttons', '--options', str(options)]):
@@ -685,7 +690,7 @@ class GraphControlsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             filename = Path(directory) / 'graph.html'
             args = SimpleNamespace(
-                save_txt=None, save_npz=None, width=1000, height=800,
+                width=1000, height=800,
                 show_buttons=False, options=None, only_404=True,
                 interactive_controls=interactive, vis_file=str(filename),
             )

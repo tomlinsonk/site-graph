@@ -1,15 +1,12 @@
-"""Graph presentation: HTML controls, drawing options, and matrix exports."""
+"""HTML graph presentation, drawing options, and exploration controls."""
 
 import html
 import json
 import urllib.parse
 from pathlib import Path
 
-import networkx as nx
-import numpy as np
 from jinja2 import ChoiceLoader, DictLoader
 from pyvis.network import Network
-from scipy import sparse
 
 INTERNAL_COLOR = '#0072BB'
 EXTERNAL_COLOR = '#FF9F40'
@@ -81,27 +78,10 @@ def prepare_graph_template(net, interactive):
 
 
 def visualize(result, args):
-    graph = nx.DiGraph()
-    graph.add_nodes_from(result.graph_nodes())
-    graph.add_edges_from(sorted(result.edges))
-    matrix_file = args.save_npz or args.save_txt
-    if matrix_file:
-        matrix = nx.to_numpy_array(graph, dtype=int)
-        if args.save_npz:
-            sparse.save_npz(matrix_file, sparse.coo_matrix(matrix))
-        else:
-            np.savetxt(matrix_file, matrix, fmt='%d')
-        labels = []
-        for url in graph:
-            item = result.nodes[url]
-            info = (f'Error: {item.error()}' if item.error() is not None else
-                    'resource' if item.is_resource() else item.scope)
-            labels.append(f'{url}\t{info}')
-        path = Path(matrix_file)
-        path.with_name(path.stem + '_nodes.txt').write_text('\n'.join(labels), encoding='utf-8')
-
     net = Network(width=f'{args.width}px', height=f'{args.height}px', directed=True)
-    net.from_nx(graph)
+    net.add_nodes(result.graph_nodes())
+    for source, target in sorted(result.edges):
+        net.add_edge(source, target, width=1)
     if args.show_buttons:
         net.show_buttons()
     elif args.options is not None:
