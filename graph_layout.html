@@ -13,10 +13,65 @@
   }
   #loadingBar progress { flex: 1; min-width: 0; width: 0; }
   #loadingBar output { font: 18px system-ui, sans-serif; color: #000; }
+  #graph-layout { clear: both; padding: .75rem; font: 14px system-ui, sans-serif; }
 </style>
+<div id="graph-layout">
+  <button id="graph-save" type="button">Save layout</button>
+  <span>Download HTML with the current positions and physics off for faster reopening.</span>
+  <span id="graph-save-status" role="status"></span>
+</div>
 <script>
-(() => {
+document.addEventListener("DOMContentLoaded", () => {
   "use strict";
+  const pane = document.getElementById("mynetwork");
+  pane.before(document.getElementById("graph-layout"));
+  // Keep the original graph, not temporary filters or selection styles.
+  graphData.edges = structuredClone(edges.get());
+  const mergeOptions = (target, changes) => {
+    for (const [key, value] of Object.entries(changes)) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        if (!target[key] || typeof target[key] !== "object") target[key] = {};
+        mergeOptions(target[key], value);
+      } else {
+        target[key] = value;
+      }
+    }
+  };
+  const freezeLayout = () => network.setOptions({physics: {enabled: false}});
+  network.on("configChange", changes => {
+    mergeOptions(graphData.options, changes);
+    if ("physics" in changes) network.off("stabilizationIterationsDone", freezeLayout);
+  });
+  {% if freeze_layout %}
+  // Freeze only the default initial layout; explicit physics options stay in charge.
+  network.once("stabilizationIterationsDone", freezeLayout);
+  {% endif %}
+  document.getElementById("graph-save").addEventListener("click", () => {
+    const status = document.getElementById("graph-save-status");
+    try {
+      const saved = structuredClone(graphData);
+      const positions = network.getPositions(nodes.getIds());
+      saved.nodes = saved.nodes.map(node => ({...node, ...positions[node.id]}));
+      saved.options.physics = {...saved.options.physics, enabled: false};
+      saved.options.layout = {...saved.options.layout, improvedLayout: false, hierarchical: false};
+      const documentCopy = graphDocument.cloneNode(true);
+      // Raw-text script elements need escaping even when their type is application/json.
+      documentCopy.querySelector("#graph-data").textContent = JSON.stringify(saved)
+        .replace(/&/g, "\\u0026").replace(/</g, "\\u003c").replace(/>/g, "\\u003e")
+        .replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+      const url = URL.createObjectURL(new Blob(["<!doctype html>\n" + documentCopy.outerHTML],
+        {type: "text/html;charset=utf-8"}));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "graph-layout.html";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      status.textContent = "Layout download started.";
+    } catch (error) {
+      console.error("Could not save graph layout", error);
+      status.textContent = "Could not save layout: " + error.message;
+    }
+  });
   // Start hidden: disabled physics/stabilization and empty graphs may emit no progress.
   const overlay = document.createElement("div");
   overlay.id = "loadingBar";
@@ -24,7 +79,7 @@
   overlay.innerHTML = '<div class="graph-loading-progress">' +
     '<progress max="1" value="0" aria-label="Graph layout progress"></progress>' +
     '<output>0%</output></div>';
-  document.getElementById("mynetwork").append(overlay);
+  pane.append(overlay);
   const bar = overlay.querySelector("progress");
   const label = overlay.querySelector("output");
   network.on("stabilizationProgress", event => {
@@ -36,5 +91,5 @@
   const hide = () => { overlay.hidden = true; };
   network.on("stabilizationIterationsDone", hide);
   network.on("stabilized", hide);
-})();
+});
 </script>

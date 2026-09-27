@@ -425,7 +425,8 @@ class JsonTests(unittest.TestCase):
             self.assertEqual([node['http_status'] for node in data['nodes']], [200, 403, 404])
             self.assertEqual([node['color'] for node in network.return_value.nodes],
                              ['#0072BB', '#FF0800', '#0072BB'])
-            network.return_value.set_options.assert_called_once_with(options.read_text())
+            self.assertEqual(json.loads(network.return_value.set_options.call_args.args[0]),
+                             {'physics': {'enabled': False}, 'edges': {'smooth': False}})
             network.return_value.save_graph.assert_called_once_with(vis_file)
             self.assertFalse(list(Path(directory).glob('*.pickle')))
             session.request.reset_mock()
@@ -482,7 +483,7 @@ class SavedWorkflowTests(unittest.TestCase):
         output = io.StringIO()
         with patch('sys.argv', ['site_graph.py', *map(str, args)]), contextlib.redirect_stdout(output), \
                 patch('render.Network', side_effect=lambda **kwargs: Network(
-                    cdn_resources='in_line', **kwargs)):
+                    **{**kwargs, 'cdn_resources': 'in_line'})):
             main()
         return output.getvalue()
 
@@ -599,13 +600,12 @@ class GraphControlsTests(unittest.TestCase):
             )
             vars(args).update(options)
             with patch('render.Network', side_effect=lambda **kwargs: Network(
-                    cdn_resources='in_line', **kwargs)), \
+                    **{**kwargs, 'cdn_resources': 'in_line'})), \
                     patch('requests.sessions.Session.request', side_effect=AssertionError('network')):
                 visualize(result, args)
             document = filename.read_text()
-        nodes = json.loads(re.search(r'nodes = new vis.DataSet\((.*?)\);', document, re.S)[1])
-        edges = json.loads(re.search(r'edges = new vis.DataSet\((.*?)\);', document, re.S)[1])
-        return document, {node['id']: node for node in nodes}, edges
+        data = json.loads(BeautifulSoup(document, 'html.parser').find(id='graph-data').string)
+        return document, {node['id']: node for node in data['nodes']}, data['edges']
 
     @patch('crawler.requests.Session')
     def test_unfollowed_redirect_is_json_evidence_not_a_graph_singleton(self, session_class):
@@ -643,12 +643,6 @@ class GraphControlsTests(unittest.TestCase):
         self.assertEqual(set(result.graph_nodes()), {self.root, failed, unfollowed, disconnected})
 
     def test_context_filters_and_loading_geometry_in_browser(self):
-        chrome = shutil.which('chromium') or shutil.which('google-chrome')
-        if not chrome:
-            candidate = Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
-            chrome = str(candidate) if candidate.is_file() else None
-        if not chrome:
-            self.skipTest('Chrome/Chromium required for browser regression')
         result = self.result()
         for name in ('section', 'referrer'):
             result.nodes[self.root + name] = CrawlNode(self.root + name, 'internal', observations=[
@@ -668,6 +662,7 @@ class GraphControlsTests(unittest.TestCase):
             result.edges.add((self.root, url))
         checks = r"""
 <script>
+document.addEventListener("DOMContentLoaded", () => {
 let failure = "";
 try {
   const check = (value, message) => { if (!value) throw Error(message); };
@@ -691,6 +686,7 @@ try {
     "Responsive progress displays correct fraction");
   network.emit("stabilizationIterationsDone");
   check(overlay.hidden, "Completion hides overlay");
+  check(network.physics.options.enabled === KEEP_PHYSICS, "Explicit physics settings take precedence");
   network.emit("stabilizationProgress", {iterations: 0, total: 0});
   network.emit("stabilized");
   check(overlay.hidden, "Early stabilization hides overlay");
@@ -747,6 +743,7 @@ try {
   document.body.append(error.stack);
 }
 fetch("/report", {method: "POST", body: failure || "PASS"});
+});
 </script>
 """
         isolated = self.result()
@@ -757,61 +754,186 @@ fetch("/report", {method: "POST", body: failure || "PASS"});
             (True, result, 720, 320, {'show_buttons': True}),
             (True, result, 1000, 450, {'options': '{"physics":{"enabled":false}}'}),
             (True, isolated, 240, 180, {'options': '{"physics":{"enabled":false}}'}),
+            (False, result, 800, 450, {'options': json.dumps({
+                'physics': {'enabled': True, 'stabilization': {'enabled': False}},
+                'layout': {'improvedLayout': False}, 'edges': {'smooth': True},
+            })}),
         ]
+        for interactive, data, width, height, options in cases:
+            with self.subTest(interactive=interactive, width=width, options=options):
+                document, _, _ = self.render(data, interactive, width=width, height=height, **options)
+                script = checks.replace('WIDTH', str(width)).replace('HEIGHT', str(height))
+                physics = json.loads(options.get('options', '{}')).get('physics', {})
+                script = script.replace('KEEP_PHYSICS', json.dumps(
+                    bool(physics) and physics.get('enabled', True)))
+                self.assertEqual(self.browser_report(document, script), 'PASS')
+
+    def browser_report(self, document, script):
+        chrome = shutil.which('chromium') or shutil.which('google-chrome')
+        if not chrome:
+            candidate = Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+            chrome = str(candidate) if candidate.is_file() else None
+        if not chrome:
+            self.skipTest('Chrome/Chromium required for browser regression')
+        # All vis assets are inline; omit unrelated Bootstrap CDN requests.
+        document = re.sub(r'<(?:script|link)\b[^>]*(?:src|href)="https://[^>]+>'
+                          r'(?:</script>)?', '', document)
         with tempfile.TemporaryDirectory() as directory:
-            for index, (interactive, data, width, height, options) in enumerate(cases):
-                with self.subTest(interactive=interactive, width=width, options=options):
-                    document, _, _ = self.render(data, interactive, width=width, height=height, **options)
-                    script = checks.replace('WIDTH', str(width)).replace('HEIGHT', str(height))
-                    # All vis assets are inline; omit unrelated Bootstrap CDN requests.
-                    document = re.sub(r'<(?:script|link)\b[^>]*(?:src|href)="https://[^>]+>'
-                                      r'(?:</script>)?', '', document)
-                    filename = Path(directory) / f'graph-{index}.html'
-                    filename.write_text(document.replace('</body>', script + '</body>'))
-                    finished, reports = Event(), []
+            filename = Path(directory) / 'graph.html'
+            filename.write_text(document.replace('</body>', script + '</body>'))
+            finished, reports = Event(), []
 
-                    class Handler(BaseHTTPRequestHandler):
-                        def log_message(self, *args):
-                            pass
+            class Handler(BaseHTTPRequestHandler):
+                def log_message(self, *args):
+                    pass
 
-                        def do_GET(self):
-                            self.send_response(200)
-                            self.send_header('Content-Type', 'text/html')
-                            self.end_headers()
-                            self.wfile.write(filename.read_bytes())
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html')
+                    self.end_headers()
+                    self.wfile.write(filename.read_bytes())
 
-                        def do_POST(self):
-                            reports.append(self.rfile.read(int(self.headers['Content-Length'])).decode())
-                            self.send_response(204)
-                            self.end_headers()
-                            finished.set()
+                def do_POST(self):
+                    reports.append(self.rfile.read(int(self.headers['Content-Length'])).decode())
+                    self.send_response(204)
+                    self.end_headers()
+                    finished.set()
 
-                    with HTTPServer(('127.0.0.1', 0), Handler) as server:
-                        thread = Thread(target=server.serve_forever)
-                        thread.start()
+            with HTTPServer(('127.0.0.1', 0), Handler) as server:
+                thread = Thread(target=server.serve_forever)
+                thread.start()
+                try:
+                    with subprocess.Popen([
+                        chrome, '--headless', '--disable-gpu', '--no-first-run',
+                        '--window-size=900,1000', '--remote-debugging-port=0',
+                        f'--user-data-dir={directory}/profile',
+                        f'http://127.0.0.1:{server.server_port}/',
+                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as browser:
                         try:
-                            with subprocess.Popen([
-                                chrome, '--headless', '--disable-gpu', '--no-first-run',
-                                '--window-size=900,1000', '--remote-debugging-port=0',
-                                f'--user-data-dir={directory}/profile-{index}',
-                                f'http://127.0.0.1:{server.server_port}/',
-                            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as browser:
-                                try:
-                                    self.assertTrue(finished.wait(30), 'Browser did not report results')
-                                    self.assertEqual(reports, ['PASS'])
-                                finally:
-                                    browser.terminate()
-                                    try:
-                                        browser.wait(timeout=5)
-                                    except subprocess.TimeoutExpired:
-                                        browser.kill()
+                            self.assertTrue(finished.wait(30), 'Browser did not report results')
+                            self.assertEqual(len(reports), 1)
+                            return reports[0]
                         finally:
-                            server.shutdown()
-                            thread.join()
+                            browser.terminate()
+                            try:
+                                browser.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                browser.kill()
+                finally:
+                    server.shutdown()
+                    thread.join()
+
+    def test_save_layout_roundtrip_in_browser(self):
+        checks = r"""
+<script id="regression-check">
+document.addEventListener("DOMContentLoaded", async () => {
+  const check = (value, message) => { if (!value) throw Error(message); };
+  try {
+    graphDocument.querySelector("#regression-check").remove();
+    await new Promise(resolve => {
+      if (network.physics.options.enabled) network.once("stabilized", resolve);
+      else requestAnimationFrame(resolve);
+    });
+    check(!network.physics.options.enabled, "Default initial layout has a finite lifecycle");
+    const initial = JSON.parse(document.getElementById("graph-data").textContent);
+    if (initial.nodes[0].x !== undefined) {
+      check(initial.nodes.every(node => {
+        const position = network.getPosition(node.id);
+        return position.x === node.x && position.y === node.y;
+      }), "Reopening preserves every position without another layout");
+      check(edges.getIds().join() === initial.edges.map(edge => edge.id).join(), "Edge IDs retained");
+    }
+    check(!document.querySelector('script[src^="lib/"]'), "No relative runtime assets");
+    check(document.querySelectorAll("#graph-layout").length === 1, "No duplicated layout controls");
+    check(document.querySelectorAll("#loadingBar").length === 1, "No duplicated overlay");
+    const root = "https://example.org/";
+    const position = network.getPosition(root);
+    network.focus(root, {scale: 1, animation: false});
+    network.redraw();
+    const canvas = document.querySelector("canvas"), box = canvas.getBoundingClientRect();
+    const point = network.canvasToDOM(position);
+    const pointer = (target, type, offset, buttons) => target.dispatchEvent(new PointerEvent(type, {
+      bubbles: true, clientX: box.x + point.x + offset, clientY: box.y + point.y + offset,
+      buttons, button: 0, pointerId: 1, pointerType: "mouse", isPrimary: true
+    }));
+    pointer(canvas, "pointerdown", 0, 1);
+    pointer(window, "pointermove", 10, 1);
+    pointer(window, "pointermove", 50, 1);
+    pointer(window, "pointerup", 50, 0);
+    check(network.getPosition(root).x !== position.x, "Saved nodes remain draggable");
+    const changes = {edges: {arrows: {to: {scaleFactor: 0.8}}}, interaction: {hideEdgesOnDrag: true}};
+    network.setOptions(changes);
+    network.emit("configChange", changes);
+    if (document.getElementById("graph-controls")) {
+      const error = document.getElementById("graph-error");
+      error.value = "404";
+      error.dispatchEvent(new Event("change"));
+      network.emit("click", {nodes: [root + "gone"]});
+      check(nodes.get().some(node => node.hidden), "Filter applied before export");
+    }
+    let blob;
+    const create = URL.createObjectURL;
+    URL.createObjectURL = value => { blob = value; return create(value); };
+    HTMLAnchorElement.prototype.click = function() {
+      check(this.download === "graph-layout.html", "HTML download filename");
+    };
+    document.getElementById("graph-save").click();
+    const savedHTML = await blob.text();
+    const saved = JSON.parse(new DOMParser().parseFromString(savedHTML, "text/html")
+      .getElementById("graph-data").textContent);
+    check(saved.nodes.length === nodes.length && saved.edges.length === edges.length, "Complete graph");
+    check(saved.nodes.every(node => {
+      const position = network.getPosition(node.id);
+      return node.x === position.x && node.y === position.y && !node.hidden && !node.opacity &&
+        node.label === "";
+    }), "Every coordinate saved, even filtered nodes; no transient node styles");
+    check(saved.edges.every(edge => !edge.hidden && edge.width === 1), "No transient edge styles");
+    check(saved.options.physics.enabled === false && saved.options.layout.improvedLayout === false,
+      "Saved layout does not recalculate");
+    check(saved.options.edges.arrows.to.scaleFactor === 0.8 &&
+      saved.options.interaction.hideEdgesOnDrag, "Drawing changes retained");
+    check(!window.injected, "Script-like URL/error text stays inert");
+    fetch("/report", {method: "POST", body: JSON.stringify({html: savedHTML})});
+  } catch (error) {
+    fetch("/report", {method: "POST", body: JSON.stringify({error: error.stack})});
+  }
+});
+</script>
+"""
+        result = self.result()
+        hostile = self.root + '</script><script>window.injected=true</script>&\u2028'
+        result.nodes[hostile] = CrawlNode(hostile, 'internal', observations=[
+            Observation('GET', 200, FetchError('request', hostile)),
+        ])
+        result.edges.add((self.root, hostile))
+        before = result.to_dict()
+        for interactive in (False, True):
+            document, original_nodes, _ = self.render(result, interactive, show_buttons=True)
+            for cycle in range(3):
+                with self.subTest(interactive=interactive, cycle=cycle):
+                    report = json.loads(self.browser_report(document, checks))
+                    self.assertNotIn('error', report, report.get('error'))
+                    document = report['html']
+                    data = json.loads(BeautifulSoup(document, 'html.parser').find(id='graph-data').string)
+                    for node in data['nodes']:
+                        self.assertEqual({key: value for key, value in node.items()
+                                          if key not in ('x', 'y')}, original_nodes[node['id']])
+        self.assertEqual(result.to_dict(), before)
 
     def test_opt_in_preserves_graph_coloring_and_drawing_options(self):
         result = self.result()
         before = copy.deepcopy(result.to_dict())
+        for drawing_options in (None, '{"layout":{"improvedLayout":false}}',
+                                '{"edges":{"smooth":{"enabled":true,"type":"dynamic"}}}'):
+            document, _, _ = self.render(result, options=drawing_options)
+            actual = json.loads(BeautifulSoup(document, 'html.parser').find(id='graph-data').string)['options']
+            if drawing_options is None:
+                self.assertFalse(actual['edges']['smooth']['enabled'])
+                self.assertEqual(actual['physics']['stabilization']['iterations'], 1000)
+            else:
+                expected = json.loads(drawing_options)
+                expected.setdefault('edges', {}).setdefault('smooth', False)
+                self.assertEqual(actual, expected)
         for options in ({'options': read_options(Path(__file__).with_name('options.txt'))},
                         {'show_buttons': True}):
             with self.subTest(options=options):

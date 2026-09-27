@@ -42,6 +42,14 @@ Error filters also show the pages linking to those errors and the internal paths
 Use `--show-buttons` to adjust the drawing settings in the browser. You can save the generated options to a file and load it with `--options`.
 Run `python3 site_graph.py -h` for all options.
 
+### Saving a layout
+
+The first open computes a layout. Straight edges keep this faster; the default layout stops physics after up to 1000 stabilization iterations. Explicit `--options` physics settings take precedence.
+
+Once the layout looks right, click **Save layout**. Open or publish the downloaded `graph-layout.html` to skip layout calculation next time. It includes all nodes, their current positions, and drawing settings, but not temporary filters or selections. Physics is disabled in the saved copy; you can still drag nodes, zoom, and use the exploration controls.
+
+The downloaded HTML can be moved to another directory or website. It needs internet access for CDN scripts/styles, but no accompanying `lib` directory. Redrawing a crawl with the CLI starts a fresh layout.
+
 ### Saved crawls
 
 To redraw a saved crawl without fetching the site again:
