@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import pickle
+import re
 import runpy
 import tempfile
 import unittest
@@ -13,13 +14,17 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import requests
+from bs4 import BeautifulSoup
 from pyvis.network import Network
 
 from crawl_result import (
     CrawlNode, CrawlResult, FetchError, Observation, from_dict, from_legacy,
     load_data, validate_crawl_data, write_json,
 )
-from site_graph import crawl, crawl_site, fetch, is_internal, main, recheck_external, resolve_url, summarize, visualize
+from site_graph import (
+    crawl, crawl_site, fetch, is_internal, main, read_options, recheck_external,
+    resolve_url, summarize, url_link, visualize,
+)
 
 
 def response(status=200, body='', headers=None):
@@ -658,6 +663,132 @@ class SavedWorkflowTests(unittest.TestCase):
         self.assertIn('1 checked, 1 unchecked; 1 fetch failures', text)
         self.assertIn('2xx=1', text)
         self.assertIn('Broken targets: 1', text)
+
+
+class GraphControlsTests(unittest.TestCase):
+    root = 'https://example.org/'
+
+    def result(self):
+        result = CrawlResult(self.root, self.root, {
+            'visit_external': False, 'keep_queries': False, 'workers': 1,
+        }, generated_at='2026-09-26T07:00:00Z')
+        result.nodes[self.root] = CrawlNode(self.root, 'internal', observations=[
+            Observation('GET', 200, type='page', discovered=True),
+        ])
+        for name, observation in [
+            ('asset', Observation('GET', 200, type='resource')),
+            ('gone', Observation('GET', 404)),
+            ('denied', Observation('GET', 403)),
+            ('busy', Observation('GET', 503)),
+            ('timeout', Observation('GET', 200, FetchError('timeout', 'body failed'))),
+        ]:
+            url = self.root + name
+            result.nodes[url] = CrawlNode(url, 'internal', observations=[observation])
+            result.edges.add((self.root, url))
+        outside = 'https://outside.test/'
+        result.nodes[outside] = CrawlNode(outside, 'external')
+        result.edges.add((outside, self.root))
+        alias = self.root + 'old'
+        result.nodes[alias] = CrawlNode(alias, 'internal', self.root, [
+            Observation('GET', 301, redirect_to=self.root),
+        ])
+        return result
+
+    def render(self, result, interactive=False, **options):
+        with tempfile.TemporaryDirectory() as directory:
+            filename = Path(directory) / 'graph.html'
+            args = SimpleNamespace(
+                save_txt=None, save_npz=None, width=1000, height=800,
+                show_buttons=False, options=None, only_404=True,
+                interactive_controls=interactive, vis_file=str(filename),
+            )
+            vars(args).update(options)
+            with patch('site_graph.Network', side_effect=lambda **kwargs: Network(
+                    cdn_resources='in_line', **kwargs)), \
+                    patch('requests.sessions.Session.request', side_effect=AssertionError('network')):
+                visualize(result, args)
+            document = filename.read_text()
+        nodes = json.loads(re.search(r'nodes = new vis.DataSet\((.*?)\);', document, re.S)[1])
+        edges = json.loads(re.search(r'edges = new vis.DataSet\((.*?)\);', document, re.S)[1])
+        return document, {node['id']: node for node in nodes}, edges
+
+    def test_opt_in_preserves_graph_coloring_and_drawing_options(self):
+        result = self.result()
+        before = copy.deepcopy(result.to_dict())
+        for options in ({'options': read_options(Path(__file__).with_name('options.txt'))},
+                        {'show_buttons': True}):
+            with self.subTest(options=options):
+                default, plain, plain_edges = self.render(result, **options)
+                document, nodes, edges = self.render(result, True, **options)
+                self.assertNotIn('id="graph-controls"', default)
+                self.assertIn('id="graph-controls"', document)
+                self.assertEqual(nodes.keys(), plain.keys())
+                self.assertEqual(edges, plain_edges)
+                self.assertNotIn(self.root + 'old', nodes)
+                self.assertEqual(nodes[self.root]['crawl']['aliases'], [self.root + 'old'])
+                for url, node in nodes.items():
+                    self.assertEqual(node['color'], plain[url]['color'])
+                    self.assertEqual(node['label'], '')
+                    self.assertNotIn('crawl', plain[url])
+                self.assertEqual(nodes[self.root + 'gone']['color'], '#FF0800')
+                self.assertEqual(nodes[self.root + 'busy']['color'], '#0072BB')
+                self.assertEqual(nodes[self.root + 'busy']['crawl']['errors'], ['5xx'])
+                if options.get('show_buttons'):
+                    self.assertIn('id="config"', document)
+                else:
+                    self.assertIn('"gravitationalConstant": -10000', document)
+        self.assertEqual(result.to_dict(), before)
+
+    def test_untrusted_urls_messages_and_options_are_not_html_or_script(self):
+        attack = '"><img src=x onerror=alert(1)></script><script>alert(2)</script>&\u2028'
+        url = self.root + attack
+        result = self.result()
+        result.nodes[url] = CrawlNode(url, 'internal', observations=[
+            Observation('GET', fetch_error=FetchError('request', attack)),
+        ])
+        result.edges.add((self.root, url))
+        for interactive in (False, True):
+            document, nodes, _ = self.render(
+                result, interactive, options=json.dumps({'locale': attack})
+            )
+            self.assertNotIn(attack, document)
+            self.assertNotIn('<script>alert(2)</script>', document)
+            tooltip = BeautifulSoup(nodes[url]['title'], 'html.parser')
+            self.assertFalse(tooltip.find(['img', 'script']))
+            self.assertEqual(tooltip.a['href'], url)
+            self.assertIn(attack, tooltip.get_text())
+            if interactive:
+                self.assertIn(attack, nodes[url]['crawl']['detail'])
+        for unsafe in ('javascript:alert(1)', 'data:text/html,bad', 'file:///etc/passwd',
+                       'https://example.org/\nunsafe', 'https://[bad'):
+            self.assertIsNone(BeautifulSoup(url_link(unsafe), 'html.parser').find('a'))
+
+    def test_explicit_check_states_errors_resources_and_isolated_roots(self):
+        _, nodes, _ = self.render(self.result(), True)
+        self.assertEqual(nodes[self.root]['crawl']['state'], 'success')
+        for name, category in [('gone', '404'), ('denied', 'other-4xx'),
+                               ('busy', '5xx'), ('timeout', 'timeout')]:
+            self.assertEqual(nodes[self.root + name]['crawl']['errors'], [category])
+            self.assertEqual(nodes[self.root + name]['crawl']['state'], 'other-checked')
+        self.assertTrue(nodes[self.root + 'asset']['crawl']['resource'])
+        self.assertEqual(nodes['https://outside.test/']['shape'], 'triangle')
+        self.assertEqual(nodes['https://outside.test/']['crawl']['state'], 'unchecked')
+        for error in ({}, {self.root: 404}, {self.root: 'old timeout'}, {self.root: 301}):
+            legacy = from_legacy((set(), error, set(), self.root))
+            _, nodes, edges = self.render(legacy, True)
+            self.assertEqual(edges, [])
+            self.assertEqual(list(nodes), [self.root])
+            self.assertEqual(nodes[self.root]['shape'], 'diamond')
+            self.assertEqual(nodes[self.root]['crawl']['state'], 'unknown')
+            self.assertIn('Discovery: unknown', nodes[self.root]['crawl']['detail'])
+            if error and error[self.root] != 404:
+                self.assertEqual(nodes[self.root]['crawl']['errors'], ['legacy-error'])
+        result = self.result()
+        result.nodes = {self.root: result.nodes[self.root]}
+        result.edges.clear()
+        _, nodes, edges = self.render(result, True)
+        self.assertEqual(edges, [])
+        self.assertEqual(list(nodes), [self.root])
 
 
 if __name__ == '__main__':

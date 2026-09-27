@@ -1,5 +1,6 @@
 import argparse
 import copy
+import html
 import json
 import pickle
 import time
@@ -16,6 +17,7 @@ import numpy as np
 import requests
 import scipy
 from bs4 import BeautifulSoup
+from jinja2 import ChoiceLoader, DictLoader
 from pyvis.network import Network
 
 from crawl_result import (
@@ -312,6 +314,74 @@ def get_node_info(nodes, result):
     return node_info
 
 
+def url_link(url):
+    text = html.escape(url, quote=True)
+    try:
+        parts = urllib.parse.urlsplit(url)
+        safe = parts.scheme in ('http', 'https') and parts.hostname and not any(
+            ord(character) < 32 for character in url
+        )
+        parts.port
+    except ValueError:
+        safe = False
+    return f'<a href="{text}" rel="noopener noreferrer">{text}</a>' if safe else text
+
+
+def exploration_info(item, aliases, generated_at):
+    latest = item.observations[-1] if item.observations else None
+    state = item.to_dict()['check_state']
+    categories = []
+    status = latest.http_status if latest else None
+    reported = status if item.metadata_known else item.legacy_error
+    if type(reported) is int and reported >= 400:
+        categories.append('404' if reported == 404 else
+                          'other-4xx' if reported < 500 else '5xx')
+    if latest and latest.fetch_error:
+        categories.append(latest.fetch_error.kind)
+    elif not item.metadata_known and reported is not None and not categories:
+        categories.append('legacy-error')
+    if state == 'checked':
+        state = ('success' if status is not None and 200 <= status < 300
+                 and not categories else 'other-checked')
+    kind = 'resource' if item.is_resource() else (
+        latest.type if latest else 'unknown'
+    )
+    detail = [
+        f'Scope: {item.scope}; type: {kind}',
+        f'Check: {state}' + (' (legacy metadata unavailable)' if state == 'unknown' else ''),
+        f'Latest HTTP status: {status if status is not None else "unknown"}',
+        'Discovery: ' + ('unknown' if not item.metadata_known else
+                         'yes' if any(obs.discovered for obs in item.observations) else 'no'),
+        f'Crawl timestamp: {generated_at or "unknown"}',
+    ]
+    if item.error() is not None:
+        detail.append(f'Error: {item.error()}')
+    if latest and latest.fetch_error:
+        detail.append(f'Fetch failure: {latest.fetch_error.kind}')
+    detail.extend(f'Alias: {alias}' for alias in aliases)
+    return {
+        'scope': item.scope, 'resource': item.is_resource(), 'state': state,
+        'errors': categories, 'aliases': aliases, 'detail': '\n'.join(detail),
+    }
+
+
+def prepare_graph_template(net, interactive):
+    # PyVis already uses tojson for nodes/edges, but inserts options as raw JSON.
+    net.templateEnv.filters['script_safe'] = lambda text: (
+        text.replace('&', '\\u0026').replace('<', '\\u003c').replace('>', '\\u003e')
+        .replace('\u2028', '\\u2028').replace('\u2029', '\\u2029')
+    )
+    template = net.templateEnv.loader.get_source(net.templateEnv, net.path)[0]
+    template = template.replace('{{options|safe}}', '{{options|script_safe|safe}}')
+    if interactive:
+        controls = Path(__file__).with_name('interactive_controls.html').read_text(encoding='utf-8')
+        template = template.replace('</body>', controls + '\n</body>')
+    net.templateEnv.loader = ChoiceLoader([
+        DictLoader({'site_graph.html': template}), net.templateEnv.loader,
+    ])
+    net.path = 'site_graph.html'
+
+
 def visualize(result, args):
     G = nx.DiGraph()
     G.add_nodes_from(result.graph_nodes())
@@ -340,6 +410,13 @@ def visualize(result, args):
     elif args.options is not None:
         net.set_options(args.options)
 
+    interactive = getattr(args, 'interactive_controls', False)
+    aliases = {}
+    if interactive:
+        for item in result.nodes.values():
+            if item.alias_of is not None:
+                aliases.setdefault(item.alias_of, []).append(item.id)
+
     for node in net.nodes:
         item = result.nodes[node['id']]
         node['size'] = 15
@@ -352,13 +429,21 @@ def visualize(result, args):
             node['color'] = EXTERNAL_COLOR
 
         if item.error() is not None:
-            node['title'] = f'{item.error()} Error: <a href="{node["id"]}">{node["id"]}</a>'
+            node['title'] = f'{html.escape(str(item.error()))} Error: {url_link(node["id"])}'
             
             if not args.only_404 or item.error() == 404:
                 node['color'] = ERROR_COLOR
         else:
-            node['title'] = f'<a href="{node["id"]}">{node["id"]}</a>'
-    
+            node['title'] = url_link(node['id'])
+
+        if interactive:
+            info = exploration_info(item, sorted(aliases.get(item.id, [])), result.generated_at)
+            node['crawl'] = info
+            node['title'] = url_link(item.id) + '<br>' + html.escape(info['detail']).replace('\n', '<br>')
+            if info['state'] in ('unchecked', 'unknown'):
+                node['shape'] = 'triangle' if info['state'] == 'unchecked' else 'diamond'
+
+    prepare_graph_template(net, interactive)
     net.save_graph(args.vis_file)
 
 
@@ -435,6 +520,7 @@ def main():
     parser.add_argument('--visit-external', action='store_true', help='detect broken external links (slower)')
     parser.add_argument('--workers', type=int, help='parallel external link checks (default: 4, or saved setting)')
     parser.add_argument('--show-buttons', action='store_true', help='show visualization settings UI')
+    parser.add_argument('--interactive-controls', action='store_true', help='add client-side URL search, filters, legend and directed neighbor selection')
     parser.add_argument('--options', type=str, help='file with drawing options (use --show-buttons to configure, then generate options)')
     parser.add_argument('--from-data-file', type=str, help='render saved JSON or trusted .pickle/.pkl without network requests')
     parser.add_argument('--recheck-external', action='store_true', help='with saved JSON, check recorded external targets again (network)')
