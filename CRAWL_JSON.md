@@ -1,7 +1,9 @@
 # Crawl JSON v1
 
-`--json-file PATH` adds an atomic, validated JSON export to a new crawl. It is not
-available with `--from-data-file`: legacy pickles lack fetch observations.
+`--json-file PATH` writes an atomic, validated JSON export. Use
+`--from-data-file crawl.json` to render without fetching any URLs.
+Add `--recheck-external` for explicit network checks; only `--json-file checked.json`
+saves those updates. Input/output paths must differ.
 
 Top-level fields:
 
@@ -48,3 +50,23 @@ UTC timestamp for reproducibility. `graph_nodes()` excludes aliases;
 `legacy_data()` and the existing `crawl(...)` API return the original
 `(edges, errors, resources, resolved_root)` tuple. Pickles retain that tuple,
 not the richer observations. No drawing settings, colors, or tooltips enter JSON.
+
+`load_data(path)` reads v1 JSON (or trusted `.pickle`/`.pkl`); `from_dict(data)`
+validates and reconstructs the result. `visualize(result, args)` consumes this
+explicit result. Legacy tuple imports preserve graph/error/resource presentation,
+but settings, requested root, timestamp, check state and discovery completeness
+are unknown. They cannot be rechecked or exported as v1 JSON. **Only load trusted
+pickles: unpickling can execute code.**
+
+`recheck_external(result, workers=None)` returns a copy with appended observations
+and recanonicalized edges/aliases. It checks unique canonical external **edge
+targets**, not historical aliases or unrelated historical nodes, using the existing
+HEAD/GET-fallback worker sessions. Redirects may be followed internally but never
+trigger discovery. Original roots, scope, query identities, discovery observations,
+and crawl settings remain intact; `generated_at` becomes the update time. Workers
+default to the saved setting; an override affects only that check. Saved-data CLI
+rejects root/query/`--visit-external` overrides to avoid silently changing policy.
+
+Console summaries count canonical nodes/edges, latest HTTP categories, unchecked
+targets and fetch failures separately from discovery completeness. Response and
+fetch-failure counts may overlap; only broken targets list their referring pages.

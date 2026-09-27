@@ -1,8 +1,10 @@
 import argparse
+import copy
+import json
 import pickle
 import time
 import urllib.parse
-from collections import deque
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
@@ -16,7 +18,10 @@ import scipy
 from bs4 import BeautifulSoup
 from pyvis.network import Network
 
-from crawl_result import CrawlNode, CrawlResult, FetchError, Observation, is_internal, utc_now, write_json
+from crawl_result import (
+    CrawlNode, CrawlResult, FetchError, Observation, is_internal, load_data,
+    utc_now, validate_crawl_data, write_json,
+)
 
 INTERNAL_COLOR = '#0072BB'
 EXTERNAL_COLOR = '#FF9F40'
@@ -157,6 +162,65 @@ def check_external_batch(urls):
         return results
 
 
+def check_external_targets(targets, workers):
+    if targets:
+        count = min(workers, len(targets))
+        batches = [targets[index::count] for index in range(count)]
+        with ThreadPoolExecutor(max_workers=count) as executor:
+            for results in executor.map(check_external_batch, batches):
+                yield from results
+
+
+def record_fetch(result, page, aliases):
+    def node(url):
+        if url not in result.nodes:
+            result.nodes[url] = CrawlNode(
+                url, 'internal' if is_internal(url, result.resolved_root_url) else 'external'
+            )
+        return result.nodes[url]
+
+    for observed_url, observation in page.observations:
+        node(observed_url).observations.append(observation)
+        if observation.redirect_to is not None:
+            node(observation.redirect_to)
+    # A cookie-setting redirect can legitimately return to an earlier URL.
+    aliases.pop(page.url, None)
+    for source, _ in page.redirects:
+        if source != page.url:
+            aliases[source] = page.url
+    error = page.error or (page.status if page.status is not None and page.status >= 400 else None)
+    if error is not None:
+        print(f'{error} ERROR while visiting {page.url}')
+
+
+def canonicalize_result(result, aliases):
+    result.edges = {(canonical_url(source, aliases), canonical_url(target, aliases))
+                    for source, target in result.edges}
+    for url, item in result.nodes.items():
+        canonical = canonical_url(url, aliases)
+        item.alias_of = canonical if canonical != url else None
+
+
+def recheck_external(result, workers=None):
+    """Check recorded canonical external edge targets, retaining discovery/history."""
+    if result.is_legacy:
+        raise ValueError('External rechecks require v1 JSON; legacy pickle has unknown crawl settings')
+    validate_crawl_data(result.to_dict())
+    workers = result.settings['workers'] if workers is None else workers
+    if type(workers) is not int or workers < 1:
+        raise ValueError('workers must be at least 1')
+    updated = copy.deepcopy(result)
+    aliases = {url: node.alias_of for url, node in updated.nodes.items() if node.alias_of is not None}
+    targets = sorted({target for _, target in updated.edges
+                      if updated.nodes[target].scope == 'external'})
+    for page in check_external_targets(targets, workers):
+        record_fetch(updated, page, aliases)
+    canonicalize_result(updated, aliases)
+    updated.generated_at = utc_now()
+    validate_crawl_data(updated.to_dict())
+    return updated
+
+
 def crawl(url, visit_external, keep_queries, workers=4):
     """Compatibility API for callers expecting the original four-item tuple."""
     return crawl_site(url, visit_external, keep_queries, workers).legacy_data()
@@ -181,20 +245,10 @@ def crawl_site(url, visit_external, keep_queries, workers=4, *, generated_at=Non
         return result.nodes[url]
 
     def record(page):
-        for observed_url, observation in page.observations:
-            node(observed_url).observations.append(observation)
-            if observation.redirect_to is not None:
-                node(observation.redirect_to)
-        # A cookie-setting redirect can legitimately return to an earlier URL.
-        aliases.pop(page.url, None)
+        record_fetch(result, page, aliases)
         for source, _ in page.redirects:
-            if source != page.url:
-                aliases[source] = page.url
             visited.add(source)
         visited.add(page.url)
-        error = page.error or (page.status if page.status is not None and page.status >= 400 else None)
-        if error is not None:
-            print(f'{error} ERROR while visiting {page.url}')
 
     with requests.Session() as session:
         root = fetch(session, url, discover=True)
@@ -235,43 +289,33 @@ def crawl_site(url, visit_external, keep_queries, workers=4, *, generated_at=Non
 
     if visit_external:
         targets = sorted({canonical_url(url, aliases) for url in external_targets} - visited)
-        if targets:
-            count = min(workers, len(targets))
-            batches = [targets[index::count] for index in range(count)]
-            with ThreadPoolExecutor(max_workers=count) as executor:
-                for results in executor.map(check_external_batch, batches):
-                    for page in results:
-                        record(page)
+        for page in check_external_targets(targets, workers):
+            record(page)
 
-    result.edges = {(canonical_url(source, aliases), canonical_url(target, aliases))
-                    for source, target in result.edges}
-    for url, item in result.nodes.items():
-        canonical = canonical_url(url, aliases)
-        item.alias_of = canonical if canonical != url else None
+    canonicalize_result(result, aliases)
     result.generated_at = generated_at if generated_at is not None else utc_now()
     return result
 
 
-def get_node_info(nodes, error_codes, resource_pages, args):
+def get_node_info(nodes, result):
     node_info = []
     for node in nodes:
-        if node in error_codes:
-            node_info.append(f'Error: {error_codes[node]}')
-        elif node in resource_pages:
+        item = result.nodes[node]
+        if item.error() is not None:
+            node_info.append(f'Error: {item.error()}')
+        elif item.is_resource():
             node_info.append('resource')
-        elif is_internal(node, args.site_url):
+        elif item.scope == 'internal':
             node_info.append('internal')
         else:
             node_info.append('external')
     return node_info
 
 
-def visualize(edges, error_codes, resource_pages, args, nodes=None):
+def visualize(result, args):
     G = nx.DiGraph()
-    G.add_node(args.site_url)
-    if nodes is not None:
-        G.add_nodes_from(nodes)
-    G.add_edges_from(edges)
+    G.add_nodes_from(result.graph_nodes())
+    G.add_edges_from(result.edges)
 
     if args.save_txt is not None or args.save_npz is not None:
         nodes = list(G.nodes())
@@ -284,7 +328,7 @@ def visualize(edges, error_codes, resource_pages, args, nodes=None):
             base_fname = args.save_txt.replace('.txt', '')
             np.savetxt(args.save_txt, adj_matrix, fmt='%d')
 
-        node_info = get_node_info(nodes, error_codes, resource_pages, args)
+        node_info = get_node_info(nodes, result)
         with open(base_fname + '_nodes.txt', 'w') as f:
             f.write('\n'.join([nodes[i] + '\t' + node_info[i] for i in range(len(nodes))]))
 
@@ -294,28 +338,23 @@ def visualize(edges, error_codes, resource_pages, args, nodes=None):
     if args.show_buttons:
         net.show_buttons()
     elif args.options is not None:
-        try:
-            with open(args.options, 'r') as f:
-                net.set_options(f.read())
-        except FileNotFoundError as e:
-            print('Error: options file', args.options, 'not found.')
-        except Exception as e:
-            print('Error applying options:', e)
+        net.set_options(args.options)
 
     for node in net.nodes:
+        item = result.nodes[node['id']]
         node['size'] = 15
         node['label'] = ''
-        if is_internal(node['id'], args.site_url):
+        if item.scope == 'internal':
             node['color'] = INTERNAL_COLOR
-            if node['id'] in resource_pages:
+            if item.is_resource():
                 node['color'] = RESOURCE_COLOR
         else:
             node['color'] = EXTERNAL_COLOR
 
-        if node['id'] in error_codes:
-            node['title'] = f'{error_codes[node["id"]]} Error: <a href="{node["id"]}">{node["id"]}</a>'
+        if item.error() is not None:
+            node['title'] = f'{item.error()} Error: <a href="{node["id"]}">{node["id"]}</a>'
             
-            if not args.only_404 or error_codes[node['id']] == 404:
+            if not args.only_404 or item.error() == 404:
                 node['color'] = ERROR_COLOR
         else:
             node['title'] = f'<a href="{node["id"]}">{node["id"]}</a>'
@@ -323,7 +362,62 @@ def visualize(edges, error_codes, resource_pages, args, nodes=None):
     net.save_graph(args.vis_file)
 
 
-if __name__ == '__main__':
+def summarize(result):
+    nodes = [result.nodes[url] for url in result.graph_nodes()]
+    lines = [f'Graph: {len(nodes)} canonical nodes, {len(result.edges)} directed edges, '
+             f'{len(result.nodes) - len(nodes)} aliases.']
+    if result.is_legacy:
+        lines.append('Discovery: unknown (legacy pickle). HTTP health and check coverage: unknown.')
+    else:
+        discovery = result.to_dict()['discovery']
+        reasons = Counter(item['reason'] for item in discovery['reasons'])
+        detail = ', '.join(f'{reason}={count}' for reason, count in sorted(reasons.items()))
+        lines.append('Discovery: ' + ('complete.' if discovery['complete'] else f'incomplete ({detail}).'))
+        checked = sum(bool(node.observations) for node in nodes)
+        categories = Counter()
+        failures = 0
+        for node in nodes:
+            if node.observations:
+                latest = node.observations[-1]
+                if latest.http_status is not None:
+                    categories[latest.http_status // 100] += 1
+                failures += latest.fetch_error is not None
+        lines.append(f'Checking (canonical): {checked} checked, {len(nodes) - checked} unchecked; '
+                     f'{failures} fetch failures.')
+        lines.append('Latest HTTP responses: ' + ', '.join(
+            f'{category}xx={categories[category]}' for category in range(1, 6)
+        ) + '. HTTP responses and fetch failures can overlap.')
+    broken = [node for node in nodes if node.error() is not None]
+    lines.append(f'{"Legacy reported errors" if result.is_legacy else "Broken targets"}: {len(broken)}.')
+    referrers = {}
+    for source, target in sorted(result.edges):
+        referrers.setdefault(target, []).append(source)
+    for node in broken:
+        lines.append(f'  {node.id}: {node.error()}')
+        lines.append('    Referred by: ' + (', '.join(referrers.get(node.id, [])) or '(none recorded)'))
+    return '\n'.join(lines)
+
+
+def read_options(filename):
+    text = Path(filename).read_text(encoding='utf-8').strip()
+    if text.startswith('var options ='):
+        text = text[len('var options ='):].strip().rstrip(';')
+    options = json.loads(text)
+    if not isinstance(options, dict):
+        raise ValueError('drawing options must be a JSON object')
+    # vis-network accepts a boolean, but pyvis's HTML generator needs an object.
+    if type(options.get('physics')) is bool:
+        options['physics'] = {'enabled': options['physics']}
+    for key, value in options.items():
+        if key in ('nodes', 'edges', 'layout', 'interaction', 'manipulation', 'physics') and not (
+                isinstance(value, dict) or (key == 'manipulation' and type(value) is bool)):
+            raise ValueError(f'invalid drawing options: {key}')
+    if 'enabled' in options.get('physics', {}) and type(options['physics']['enabled']) is not bool:
+        raise ValueError('invalid drawing options: physics.enabled must be boolean')
+    return json.dumps(options)
+
+
+def main():
     parser = argparse.ArgumentParser(description='Visualize the link graph of a website.')
     parser.add_argument('site_url', type=str, help='the base URL of the website', nargs='?', default='')
 
@@ -339,10 +433,11 @@ if __name__ == '__main__':
     parser.add_argument('--width', type=int, help=f'width of graph visualization in pixels (default: {width})', default=width)
     parser.add_argument('--height', type=int, help=f'height of graph visualization in pixels (default: {height})', default=height)
     parser.add_argument('--visit-external', action='store_true', help='detect broken external links (slower)')
-    parser.add_argument('--workers', type=int, default=4, help='parallel external link checks (default: 4; use 1 for serial checks)')
+    parser.add_argument('--workers', type=int, help='parallel external link checks (default: 4, or saved setting)')
     parser.add_argument('--show-buttons', action='store_true', help='show visualization settings UI')
     parser.add_argument('--options', type=str, help='file with drawing options (use --show-buttons to configure, then generate options)')
-    parser.add_argument('--from-data-file', type=str, help='create visualization from given data file', default=None)
+    parser.add_argument('--from-data-file', type=str, help='render saved JSON or trusted .pickle/.pkl without network requests')
+    parser.add_argument('--recheck-external', action='store_true', help='with saved JSON, check recorded external targets again (network)')
     parser.add_argument('--force', action='store_true', help='override warnings about base URL')
     parser.add_argument('--save-txt', type=str, nargs='?', help='filename in which to save adjacency matrix (if no argument, uses adj_matrix.txt). Also saves node labels to [filename]_nodes.txt', const='adj_matrix.txt', default=None)
     parser.add_argument('--save-npz', type=str, nargs='?', help='filename in which to save sparse adjacency matrix (if no argument, uses adj_matrix.npz). Also saves node labels to [filename]_nodes.txt',  const='adj_matrix.npz', default=None)
@@ -350,54 +445,75 @@ if __name__ == '__main__':
     parser.add_argument('--only-404', action='store_true', help='only color 404 error nodes in the error color')
 
     args = parser.parse_args()
-    if args.workers < 1:
+    if args.workers is not None and args.workers < 1:
         parser.error('--workers must be at least 1')
-    if args.json_file is not None and args.from_data_file is not None:
-        parser.error('--json-file requires a new crawl; legacy pickle lacks fetch observations')
-    if args.json_file is not None:
-        outputs = [args.data_file, args.vis_file]
+    if args.width < 1 or args.height < 1:
+        parser.error('--width and --height must be positive')
+    if not args.vis_file.endswith('.html'):
+        parser.error('--vis-file must end in .html')
+    if args.show_buttons and args.options:
+        parser.error('--show-buttons and --options cannot be combined')
+    if args.save_txt and args.save_npz:
+        parser.error('choose --save-txt or --save-npz, not both')
+    if args.recheck_external and not args.from_data_file:
+        parser.error('--recheck-external requires --from-data-file')
+    if args.from_data_file and (args.site_url or args.visit_external or args.keep_queries):
+        parser.error('saved data defines root/scope/query policy; use --recheck-external for network checks')
+
+    outputs = [args.vis_file]
+    if not args.from_data_file:
+        outputs.append(args.data_file)
+    if args.json_file:
+        outputs.append(args.json_file)
+    if args.save_npz:
+        outputs += [args.save_npz if args.save_npz.endswith('.npz') else args.save_npz + '.npz',
+                    args.save_npz.replace('.npz', '') + '_nodes.txt']
+    elif args.save_txt:
+        outputs += [args.save_txt, args.save_txt.replace('.txt', '') + '_nodes.txt']
+    inputs = [value for value in (args.options, args.from_data_file) if value]
+    paths = [Path(value).resolve() for value in outputs + inputs]
+    if len(paths) != len(set(paths)):
+        parser.error('input and output files must have distinct paths')
+    for filename in outputs:
+        path = Path(filename)
+        if not path.parent.is_dir() or path.is_dir():
+            parser.error(f'invalid output path: {filename}')
+    try:
         if args.options is not None:
-            outputs.append(args.options)
-        if args.save_npz is not None:
-            matrix_file = args.save_npz if args.save_npz.endswith('.npz') else args.save_npz + '.npz'
-            outputs += [matrix_file, args.save_npz.replace('.npz', '') + '_nodes.txt']
-        elif args.save_txt is not None:
-            outputs += [args.save_txt, args.save_txt.replace('.txt', '') + '_nodes.txt']
-        if Path(args.json_file).resolve() in {Path(output).resolve() for output in outputs}:
-            parser.error('--json-file must differ from other input/output files')
+            args.options = read_options(args.options)
+    except (OSError, ValueError) as error:
+        parser.error(f'Cannot load drawing options: {error}')
 
-    nodes = None
-    if args.from_data_file is None:
-        site_url = resolve_url(args.site_url)
-        if site_url is None:
-            parser.error('site_url must be an absolute HTTP or HTTPS URL')
-        if urllib.parse.urlsplit(site_url).scheme != 'https':
-            if not args.force:
-                print('Warning: not using https. If you really want to use http, run with --force')
-                exit(1)
-
-        try:
+    try:
+        if args.from_data_file is None:
+            site_url = resolve_url(args.site_url)
+            if site_url is None:
+                parser.error('site_url must be an absolute HTTP or HTTPS URL')
+            if urllib.parse.urlsplit(site_url).scheme != 'https' and not args.force:
+                parser.error('not using https; use --force to allow http')
             result = crawl_site(
-                site_url, args.visit_external, args.keep_queries, args.workers
+                site_url, args.visit_external, args.keep_queries, args.workers or 4
             )
-            edges, error_codes, resource_pages, args.site_url = result.legacy_data()
-            nodes = result.graph_nodes()
-            if args.json_file is not None:
-                write_json(result, args.json_file)
-                print(f'Saved crawl JSON to {args.json_file}')
-        except ValueError as error:
-            parser.exit(1, f'Error: {error}\n')
-        except OSError as error:
-            parser.exit(1, f'Error saving crawl JSON: {error}\n')
-        print('Crawl complete.')
-
-        with open(args.data_file, 'wb') as f:
-            pickle.dump((edges, error_codes, resource_pages, args.site_url), f)
+            with open(args.data_file, 'wb') as f:
+                pickle.dump(result.legacy_data(), f)
             print(f'Saved crawl data to {args.data_file}')
-    else:
-        with open(args.from_data_file, 'rb') as f:
-            edges, error_codes, resource_pages, site_url = pickle.load(f)
-            args.site_url = site_url
-
-    visualize(edges, error_codes, resource_pages, args, nodes=nodes)
+        else:
+            result = load_data(args.from_data_file)
+            if result.is_legacy and (args.json_file or args.recheck_external):
+                parser.error('legacy pickle has unknown crawl metadata; JSON export/recheck requires v1 JSON')
+            if args.recheck_external:
+                result = recheck_external(result, args.workers)
+                if args.json_file is None:
+                    print('External checks updated in memory only; use --json-file to save them.')
+        if args.json_file is not None:
+            write_json(result, args.json_file)
+            print(f'Saved crawl JSON to {args.json_file}')
+        print(summarize(result))
+        visualize(result, args)
+    except (ValueError, OSError) as error:
+        parser.exit(1, f'Error: {error}\n')
     print('Saved graph to', args.vis_file)
+
+
+if __name__ == '__main__':
+    main()
