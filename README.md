@@ -5,6 +5,8 @@
 - [my blog post about this project](https://www.kirantomlinson.com/post/site-graph/)
 - [a live example on my website](https://www.kirantomlinson.com/graph/)
 
+> Update: I revisited this project after a while. I thought I would see what GPT-6 could do with it. It's now faster and probably has fewer bugs. (The save format is also different, hopefully that doesn't bother anyone.) What a time we live in. 
+
 ## Dependencies
 python3
 - bs4
