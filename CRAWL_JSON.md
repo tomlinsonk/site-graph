@@ -1,6 +1,7 @@
 # Crawl JSON v1
 
-`--json-file PATH` writes an atomic, validated JSON export. Use
+New crawls write atomic, validated `crawl.json` by default; `--json-file PATH`
+chooses a different output. Use
 `--from-data-file crawl.json` to render without fetching any URLs.
 Add `--recheck-external` for explicit network checks; only `--json-file checked.json`
 saves those updates. Input/output paths must differ.
@@ -43,25 +44,21 @@ undiscovered internal HTML does: checking does not expand the crawl frontier.
 Completeness describes this anchor-link crawler's observations, not JavaScript,
 unlinked pages, or a guarantee that the website remained unchanged.
 
-Python API: `site_graph.crawl_site(...)` returns `crawl_result.CrawlResult`;
+Python API: `crawler.crawl_site(...)` returns `crawl_result.CrawlResult`;
 `to_dict()`, `validate_crawl_data(data)`, and `write_json(result, filename)` are
 the v1 serialization boundary. `generated_at=` on `crawl_site` accepts a fixed
 UTC timestamp for reproducibility. `graph_nodes()` excludes aliases and unfollowed
 redirect destinations with no observations or link edges (for example, beyond the
 redirect limit). These remain in JSON; isolated roots and other disconnected
 observations remain in the graph.
-`legacy_data()` and the existing `crawl(...)` API return the original
-`(edges, errors, resources, resolved_root)` tuple. Pickles retain that tuple,
-not the richer observations. No drawing settings, colors, or tooltips enter JSON.
+No drawing settings, colors, or tooltips enter JSON.
 
-`load_data(path)` reads v1 JSON (or trusted `.pickle`/`.pkl`); `from_dict(data)`
-validates and reconstructs the result. `visualize(result, args)` consumes this
-explicit result. Legacy tuple imports preserve graph/error/resource presentation,
-but settings, requested root, timestamp, check state and discovery completeness
-are unknown. They cannot be rechecked or exported as v1 JSON. **Only load trusted
-pickles: unpickling can execute code.**
+`crawl_result.load_data(path)` reads v1 JSON; `from_dict(data)` validates and
+reconstructs the result. `render.visualize(result, args)` consumes this model.
+Pickle storage, `--data-file`, `crawl(...)`, `legacy_data()`, and `from_legacy(...)`
+have been removed rather than maintained as a second data model.
 
-`recheck_external(result, workers=None)` returns a copy with appended observations
+`crawler.recheck_external(result, workers=None)` returns a copy with appended observations
 and recanonicalized edges/aliases. It checks unique canonical external **edge
 targets**, not historical aliases or unrelated historical nodes, using the existing
 HEAD/GET-fallback worker sessions. Redirects may be followed internally but never

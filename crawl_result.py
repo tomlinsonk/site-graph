@@ -1,13 +1,13 @@
-"""Version 1 crawl data, independent of visualization and pickle storage."""
+"""Crawl model, JSON v1 validation/storage, and console summaries."""
 
 import json
 import os
-import pickle
 import tempfile
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional
 from urllib.parse import urlsplit
 
 
@@ -51,14 +51,13 @@ class CrawlNode:
     scope: str
     alias_of: Optional[str] = None
     observations: list[Observation] = field(default_factory=list)
-    metadata_known: bool = True
-    legacy_error: Optional[Union[int, str]] = None
-    legacy_resource: bool = False
+
+    @property
+    def latest(self):
+        return self.observations[-1] if self.observations else None
 
     def error(self):
-        if not self.metadata_known:
-            return self.legacy_error
-        latest = self.observations[-1] if self.observations else None
+        latest = self.latest
         if latest is not None:
             if latest.fetch_error is not None:
                 return latest.fetch_error.message
@@ -67,21 +66,18 @@ class CrawlNode:
         return None
 
     def is_resource(self):
-        return self.legacy_resource if not self.metadata_known else (
-            bool(self.observations) and self.observations[-1].type == 'resource'
-        )
+        return self.latest is not None and self.latest.type == 'resource'
 
     def to_dict(self):
-        latest = self.observations[-1] if self.observations else Observation('GET')
+        latest = self.latest
         return {
             'id': self.id,
             'scope': self.scope,
             'alias_of': self.alias_of,
-            'type': latest.type,
-            'check_state': ('unknown' if not self.metadata_known else
-                            'checked' if self.observations else 'unchecked'),
-            'http_status': latest.http_status,
-            'fetch_error': asdict(latest.fetch_error) if latest.fetch_error else None,
+            'type': latest.type if latest else 'unknown',
+            'check_state': 'checked' if latest else 'unchecked',
+            'http_status': latest.http_status if latest else None,
+            'fetch_error': asdict(latest.fetch_error) if latest and latest.fetch_error else None,
             'observations': [asdict(observation) for observation in self.observations],
         }
 
@@ -112,13 +108,19 @@ def discovery_summary(nodes):
 
 @dataclass
 class CrawlResult:
-    requested_root_url: Optional[str]
+    requested_root_url: str
     resolved_root_url: str
     settings: dict
     nodes: dict[str, CrawlNode] = field(default_factory=dict)
     edges: set[tuple[str, str]] = field(default_factory=set)
-    generated_at: Optional[str] = field(default_factory=utc_now)
-    is_legacy: bool = False
+    generated_at: str = field(default_factory=utc_now)
+
+    def node(self, url):
+        if url not in self.nodes:
+            self.nodes[url] = CrawlNode(
+                url, 'internal' if is_internal(url, self.resolved_root_url) else 'external'
+            )
+        return self.nodes[url]
 
     def graph_nodes(self):
         endpoints = {url for edge in self.edges for url in edge}
@@ -133,22 +135,7 @@ class CrawlResult:
                               node.observations or url in endpoints or url not in redirect_targets
                           )))
 
-    def legacy_data(self):
-        errors = {}
-        resources = set()
-        for url in self.graph_nodes():
-            node = self.nodes[url]
-            if node.error() is not None:
-                errors[url] = node.error()
-            elif node.is_resource() or (
-                    node.metadata_known and node.observations
-                    and node.observations[-1].type == 'unknown'):
-                resources.add(url)
-        return self.edges, errors, resources, self.resolved_root_url
-
     def to_dict(self):
-        if self.is_legacy:
-            raise ValueError('Legacy pickle has unknown crawl metadata; JSON export requires v1 JSON or a new crawl')
         nodes = [self.nodes[url].to_dict() for url in sorted(self.nodes)]
         checked = sum(node['check_state'] == 'checked' for node in nodes)
         return {
@@ -182,52 +169,9 @@ def from_dict(data):
     return result
 
 
-def from_legacy(data):
-    """Adapt a trusted old tuple for rendering, not as evidence of a crawl."""
-    if not isinstance(data, tuple) or len(data) != 4:
-        raise ValueError('Invalid legacy crawl data: expected (edges, errors, resources, root)')
-    edges, errors, resources, root = data
-    if not isinstance(edges, (set, list, tuple)) or not isinstance(errors, dict) or not isinstance(
-            resources, (set, list, tuple)):
-        raise ValueError('Invalid legacy crawl data: edges, errors or resources')
-    urls = [root, *errors, *resources]
-    for edge in edges:
-        if not isinstance(edge, (tuple, list)) or len(edge) != 2:
-            raise ValueError('Invalid legacy crawl data: directed edge pair required')
-        urls.extend(edge)
-    for url in urls:
-        try:
-            parts = urlsplit(url) if isinstance(url, str) else None
-            valid = parts is not None and parts.scheme in ('http', 'https') and parts.hostname
-            if valid:
-                parts.port
-        except ValueError:
-            valid = False
-        if not valid:
-            raise ValueError(f'Invalid legacy crawl data: URL {url!r}')
-    if any(not (type(error) is str or type(error) is int) for error in errors.values()):
-        raise ValueError('Invalid legacy crawl data: error value')
-    result = CrawlResult(None, root, {'visit_external': None, 'keep_queries': None, 'workers': None},
-                         generated_at=None, is_legacy=True)
-    result.edges = {tuple(edge) for edge in edges}
-    for url in urls:
-        result.nodes[url] = CrawlNode(
-            url, 'internal' if is_internal(url, root) else 'external',
-            metadata_known=False, legacy_error=errors.get(url), legacy_resource=url in resources,
-        )
-    return result
-
-
 def load_data(filename):
-    """Read JSON, or an explicitly named trusted .pickle/.pkl legacy file."""
-    path = Path(filename)
-    if path.suffix.lower() in ('.pickle', '.pkl'):
-        with path.open('rb') as source:
-            try:
-                return from_legacy(pickle.load(source))
-            except (pickle.UnpicklingError, EOFError, AttributeError, ImportError, IndexError) as error:
-                raise ValueError(f'Invalid legacy crawl data: {error}') from error
-    with path.open(encoding='utf-8') as source:
+    """Read and validate a JSON v1 crawl."""
+    with Path(filename).open(encoding='utf-8') as source:
         return from_dict(json.load(source))
 
 
@@ -286,11 +230,7 @@ def validate_crawl_data(data):
         url(node['id'], path + '.id')
         require(node['id'] not in nodes, path + '.id (duplicate)')
         nodes[node['id']] = node
-        require(node['scope'] in ('internal', 'external'), path + '.scope')
-        require(node['type'] in ('page', 'resource', 'unknown'), path + '.type')
-        require(node['check_state'] in ('checked', 'unchecked'), path + '.check_state')
         status(node['http_status'], path + '.http_status')
-        error(node['fetch_error'], path + '.fetch_error')
         if node['alias_of'] is not None:
             url(node['alias_of'], path + '.alias_of')
         require(type(node['observations']) is list, path + '.observations')
@@ -320,7 +260,7 @@ def validate_crawl_data(data):
         }
         for key in ('http_status', 'fetch_error', 'type'):
             require(node[key] == latest[key], path + '.' + key + ' (summary)')
-        require((node['check_state'] == 'checked') == bool(node['observations']),
+        require(node['check_state'] == ('checked' if node['observations'] else 'unchecked'),
                 path + '.check_state (summary)')
 
     for node in nodes.values():
@@ -379,3 +319,37 @@ def write_json(result, filename):
     finally:
         if temporary is not None and os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def summarize(result):
+    nodes = [result.nodes[url] for url in sorted(result.nodes)
+             if result.nodes[url].alias_of is None]
+    aliases = len(result.nodes) - len(nodes)
+    graph_nodes = set(result.graph_nodes())
+    observation_only = sum(node.id not in graph_nodes for node in nodes)
+    lines = [f'Graph: {len(graph_nodes)} canonical nodes, {len(result.edges)} directed edges, '
+             f'{aliases} aliases.']
+    if observation_only:
+        lines.append(f'JSON only: {observation_only} unfollowed redirect destinations '
+                     '(not linked or checked).')
+    discovery = discovery_summary(node.to_dict() for node in nodes)
+    reasons = Counter(item['reason'] for item in discovery['reasons'])
+    detail = ', '.join(f'{reason}={count}' for reason, count in sorted(reasons.items()))
+    lines.append('Discovery: ' + ('complete.' if discovery['complete'] else f'incomplete ({detail}).'))
+    checked = [node.latest for node in nodes if node.latest]
+    categories = Counter(obs.http_status // 100 for obs in checked if obs.http_status is not None)
+    failures = sum(obs.fetch_error is not None for obs in checked)
+    lines.append(f'Checking (canonical): {len(checked)} checked, {len(nodes) - len(checked)} unchecked; '
+                 f'{failures} fetch failures.')
+    lines.append('Latest HTTP responses: ' + ', '.join(
+        f'{category}xx={categories[category]}' for category in range(1, 6)
+    ) + '. HTTP responses and fetch failures can overlap.')
+    broken = [node for node in nodes if node.error() is not None]
+    lines.append(f'Broken targets: {len(broken)}.')
+    referrers = {}
+    for source, target in sorted(result.edges):
+        referrers.setdefault(target, []).append(source)
+    for node in broken:
+        lines.append(f'  {node.id}: {node.error()}')
+        lines.append('    Referred by: ' + (', '.join(referrers.get(node.id, [])) or '(none recorded)'))
+    return '\n'.join(lines)

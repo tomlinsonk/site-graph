@@ -1,4 +1,4 @@
-*.pickle
+crawl.json
 *.html
 !interactive_controls.html
 !graph_layout.html
