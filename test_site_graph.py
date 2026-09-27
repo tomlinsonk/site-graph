@@ -684,6 +684,17 @@ try {
     equal(progress.y + progress.height / 2, cover.y + cover.height / 2), "Progress centered in pane");
   check(progress.width <= cover.width && overlay.querySelector("progress").value === .5,
     "Responsive progress displays correct fraction");
+  const toggle = document.getElementById("graph-physics");
+  const pill = document.getElementById("graph-physics-control");
+  const pillBox = pill.getBoundingClientRect();
+  check(pill.parentElement === pane && equal(box.right - pillBox.right, 13) &&
+    equal(pillBox.top - box.top, 13), "Physics switch sits inside the top-right corner");
+  check(pillBox.left >= box.left && pillBox.bottom <= box.bottom, "Physics switch fits small graphs");
+  const switchBox = toggle.getBoundingClientRect();
+  check(document.elementFromPoint(switchBox.x + switchBox.width / 2,
+    switchBox.y + switchBox.height / 2) === toggle, "Physics switch remains usable while loading");
+  check(toggle.getAttribute("role") === "switch" && toggle.labels[0] === pill,
+    "Physics switch has an accessible label");
   network.emit("stabilizationIterationsDone");
   check(overlay.hidden, "Completion hides overlay");
   check(network.physics.options.enabled === KEEP_PHYSICS, "Explicit physics settings take precedence");
@@ -869,7 +880,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     const paused = JSON.stringify(network.getPositions(nodes.getIds()));
     physics.click();
     check(network.physics.options.enabled, "Physics resumes with the toggle");
-    await new Promise(resolve => setTimeout(resolve, 150));
+    for (let attempt = 0; attempt < 20 &&
+        JSON.stringify(network.getPositions(nodes.getIds())) === paused; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
     check(JSON.stringify(network.getPositions(nodes.getIds())) !== paused, "Resumed physics moves nodes");
     check(document.getElementById("loadingBar").hidden, "Resume does not repeat hidden initial layout");
     physics.click();
