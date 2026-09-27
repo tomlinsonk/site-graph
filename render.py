@@ -2,6 +2,8 @@
 
 import html
 import json
+import os
+import tempfile
 import urllib.parse
 from pathlib import Path
 
@@ -65,7 +67,7 @@ def prepare_graph_template(net, interactive):
     template = net.templateEnv.loader.get_source(net.templateEnv, net.path)[0]
     template = template.replace(
         'function drawGraph() {',
-        'var graphDocument, graphData;\n'
+        'var graphData;\n'
         'function drawGraph() {\n'
         'graphData = JSON.parse(document.getElementById("graph-data").textContent);',
     )
@@ -75,7 +77,6 @@ def prepare_graph_template(net, interactive):
     template = template.replace(
         'drawGraph();',
         'document.addEventListener("DOMContentLoaded", () => {\n'
-        'graphDocument = document.documentElement.cloneNode(true);\n'
         'drawGraph();\n'
         '});',
     )
@@ -135,7 +136,35 @@ def visualize(result, args):
                 node['shape'] = 'triangle'
 
     prepare_graph_template(net, args.interactive_controls)
-    net.save_graph(args.vis_file)
+    if not args.prelayout:
+        net.save_graph(args.vis_file)
+        return
+
+    from prelayout import compute_positions
+
+    positions = compute_positions(net.generate_html(), result.graph_nodes())
+    for node in net.nodes:
+        node.update(positions[node['id']])
+    options = json.loads(net.get_network_data()[-1])
+    physics = options.setdefault('physics', {})
+    stabilization = physics.get('stabilization', {})
+    physics['stabilization'] = {
+        **(stabilization if isinstance(stabilization, dict) else {}), 'enabled': False,
+    }
+    options.setdefault('layout', {}).update(improvedLayout=False, hierarchical=False)
+    net.options = options
+    document = net.generate_html()
+    destination = Path(args.vis_file)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=destination.parent,
+                                         suffix='.html', delete=False) as output:
+            temporary = Path(output.name)
+            output.write(document)
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def read_options(filename):

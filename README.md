@@ -39,14 +39,11 @@ Use `--only-404` to color only 404 errors red. Other errors are still shown on h
 Add `--interactive-controls` to search URLs, filter nodes, and highlight links to and from a selected node.
 Error filters also show the pages linking to those errors and the internal paths leading to them.
 
+Add `--prelayout` to compute the layout before saving HTML.
+Requires `python3 -m pip install playwright` and `python3 -m playwright install chromium`.
+
 Use `--show-buttons` to adjust the drawing settings in the browser. You can save the generated options to a file and load it with `--options`.
 Run `python3 site_graph.py -h` for all options.
-
-### Saving a layout
-
-Once the graph settles, click **Save layout**. Reopen or publish the downloaded `graph-layout.html` to skip layout calculation next time.
-It keeps all nodes and drawing settings, not filters or selections, and still needs internet access.
-Use **Physics** to pause or resume motion; saving keeps your choice.
 
 ### Saved crawls
 

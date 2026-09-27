@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Barrier, Event, Thread
 from types import SimpleNamespace
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import requests
 from bs4 import BeautifulSoup
@@ -201,7 +201,7 @@ class CrawlTests(unittest.TestCase):
         self.assertEqual(result.resolved_root_url, root)
         args = SimpleNamespace(site_url=root,
                                width=1000, height=800, show_buttons=False, options=None,
-                               only_404=False, interactive_controls=False, vis_file='unused.html')
+                               only_404=False, interactive_controls=False, prelayout=False, vis_file='unused.html')
         with patch('render.Network') as network:
             visualize(result, args)
             network.return_value.add_nodes.assert_called_once_with([root])
@@ -595,7 +595,7 @@ class GraphControlsTests(unittest.TestCase):
             filename = Path(directory) / 'graph.html'
             args = SimpleNamespace(
                 width=1000, height=800,
-                show_buttons=False, options=None, only_404=True,
+                show_buttons=False, options=None, only_404=True, prelayout=False,
                 interactive_controls=interactive, vis_file=str(filename),
             )
             vars(args).update(options)
@@ -833,33 +833,32 @@ fetch("/report", {method: "POST", body: failure || "PASS"});
                     server.shutdown()
                     thread.join()
 
-    def test_save_layout_roundtrip_in_browser(self):
+    def test_prelayout_and_physics_in_browser(self):
+        try:
+            import playwright.async_api
+        except ImportError:
+            self.skipTest('Playwright required for prelayout regression')
         checks = r"""
-<script id="regression-check">
+<script>
 document.addEventListener("DOMContentLoaded", async () => {
   const check = (value, message) => { if (!value) throw Error(message); };
   try {
-    graphDocument.querySelector("#regression-check").remove();
     const physics = document.getElementById("graph-physics");
     check(physics.checked === network.physics.options.enabled, "Physics toggle matches startup options");
     const initial = JSON.parse(document.getElementById("graph-data").textContent);
-    if (initial.nodes[0].x !== undefined) {
-      check(initial.nodes.every(node => {
-        const position = network.getPosition(node.id);
-        return position.x === node.x && position.y === node.y;
-      }), "Reopening preserves every position without another layout");
-      check(edges.getIds().join() === initial.edges.map(edge => edge.id).join(), "Edge IDs retained");
-      check(physics.checked === initial.options.physics.enabled, "Saved physics setting restored");
-      check(!network.physics.options.stabilization.enabled, "Saved layout skips initial stabilization");
-    } else {
-      await new Promise(resolve => network.once("stabilizationIterationsDone", resolve));
-      check(physics.checked, "Fresh graphs keep physics on after initial stabilization");
-    }
+    check(initial.nodes.every(node => {
+      const position = network.getPosition(node.id);
+      return position.x === node.x && position.y === node.y;
+    }), "Opening preserves every position without another layout");
+    check(physics.checked === (initial.options.physics.enabled !== false), "Physics setting retained");
+    check(!network.physics.options.stabilization.enabled, "Prelayout skips initial stabilization");
+    check(!network.layoutEngine.options.improvedLayout &&
+      !network.layoutEngine.options.hierarchical.enabled, "Initial layouts disabled");
+    check(!document.getElementById("graph-save"), "No Save layout control");
     if (physics.checked) physics.click();
     await new Promise(resolve => requestAnimationFrame(resolve));
     check(!network.physics.options.enabled, "Physics can be paused");
     check(!document.querySelector('script[src^="lib/"]'), "No relative runtime assets");
-    check(document.querySelectorAll("#graph-layout").length === 1, "No duplicated layout controls");
     check(document.querySelectorAll("#loadingBar").length === 1, "No duplicated overlay");
     const root = "https://example.org/";
     const position = network.getPosition(root);
@@ -875,7 +874,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     pointer(window, "pointermove", 10, 1);
     pointer(window, "pointermove", 50, 1);
     pointer(window, "pointerup", 50, 0);
-    check(network.getPosition(root).x !== position.x, "Saved nodes remain draggable");
+    check(network.getPosition(root).x !== position.x, "Prelaid nodes remain draggable");
     const paused = JSON.stringify(network.getPositions(nodes.getIds()));
     physics.click();
     check(network.physics.options.enabled, "Physics resumes with the toggle");
@@ -887,44 +886,26 @@ document.addEventListener("DOMContentLoaded", async () => {
     check(document.getElementById("loadingBar").hidden, "Resume does not repeat hidden initial layout");
     physics.click();
     check(!network.physics.options.enabled, "Physics pauses again");
-    const changes = {edges: {arrows: {to: {scaleFactor: 0.8}}}, interaction: {hideEdgesOnDrag: true}};
-    network.setOptions(changes);
-    network.emit("configChange", changes);
+    network.setOptions({physics: {enabled: true}});
+    network.emit("configChange", {physics: {enabled: true}});
+    check(physics.checked, "Settings UI synchronizes physics switch");
+    physics.click();
     if (document.getElementById("graph-controls")) {
       const error = document.getElementById("graph-error");
       error.value = "404";
       error.dispatchEvent(new Event("change"));
       network.emit("click", {nodes: [root + "gone"]});
-      check(nodes.get().some(node => node.hidden), "Filter applied before export");
+      check(nodes.get().some(node => node.hidden), "Filtering works after prelayout");
+      document.getElementById("graph-reset").click();
+      const search = document.getElementById("graph-search");
+      search.value = "gone";
+      search.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter"}));
+      check(network.getSelectedNodes()[0] === root + "gone", "Search works after prelayout");
     }
-    let blob;
-    const create = URL.createObjectURL;
-    URL.createObjectURL = value => { blob = value; return create(value); };
-    HTMLAnchorElement.prototype.click = function() {
-      check(this.download === "graph-layout.html", "HTML download filename");
-    };
-    if (SAVE_PHYSICS) physics.click();
-    const savedPositions = network.getPositions(nodes.getIds());
-    document.getElementById("graph-save").click();
-    const savedHTML = await blob.text();
-    const saved = JSON.parse(new DOMParser().parseFromString(savedHTML, "text/html")
-      .getElementById("graph-data").textContent);
-    check(saved.nodes.length === nodes.length && saved.edges.length === edges.length, "Complete graph");
-    check(saved.nodes.every(node => {
-      const position = savedPositions[node.id];
-      return node.x === position.x && node.y === position.y && !node.hidden && !node.opacity &&
-        node.label === "";
-    }), "Every coordinate saved, even filtered nodes; no transient node styles");
-    check(saved.edges.every(edge => !edge.hidden && edge.width === 1), "No transient edge styles");
-    check(saved.options.physics.enabled === SAVE_PHYSICS, "Saving preserves the chosen physics state");
-    check(saved.options.physics.stabilization.enabled === false &&
-      saved.options.layout.improvedLayout === false, "Saved layout skips initial calculation");
-    check(saved.options.edges.arrows.to.scaleFactor === 0.8 &&
-      saved.options.interaction.hideEdgesOnDrag, "Drawing changes retained");
     check(!window.injected, "Script-like URL/error text stays inert");
-    fetch("/report", {method: "POST", body: JSON.stringify({html: savedHTML})});
+    fetch("/report", {method: "POST", body: "PASS"});
   } catch (error) {
-    fetch("/report", {method: "POST", body: JSON.stringify({error: error.stack})});
+    fetch("/report", {method: "POST", body: error.stack});
   }
 });
 </script>
@@ -936,19 +917,74 @@ document.addEventListener("DOMContentLoaded", async () => {
         ])
         result.edges.add((self.root, hostile))
         before = result.to_dict()
-        for interactive in (False, True):
-            document, original_nodes, _ = self.render(result, interactive, show_buttons=True)
-            for cycle in range(3):
-                with self.subTest(interactive=interactive, cycle=cycle):
-                    script = checks.replace('SAVE_PHYSICS', json.dumps(cycle % 2 == 0))
-                    report = json.loads(self.browser_report(document, script))
-                    self.assertNotIn('error', report, report.get('error'))
-                    document = report['html']
-                    data = json.loads(BeautifulSoup(document, 'html.parser').find(id='graph-data').string)
-                    for node in data['nodes']:
-                        self.assertEqual({key: value for key, value in node.items()
-                                          if key not in ('x', 'y')}, original_nodes[node['id']])
+        for options in ({'show_buttons': True},
+                        {'options': '{"physics":{"enabled":false}}'},
+                        {'options': '{"layout":{"hierarchical":true},"physics":{"stabilization":false}}'}):
+            with self.subTest(options=options):
+                _, original_nodes, original_edges = self.render(result, True, **options)
+                document, nodes, edges = self.render(result, True, prelayout=True, **options)
+                self.assertEqual(edges, original_edges)
+                self.assertEqual(self.browser_report(document, checks), 'PASS')
+                for node in nodes.values():
+                    self.assertEqual({key: value for key, value in node.items()
+                                      if key not in ('x', 'y')}, original_nodes[node['id']])
         self.assertEqual(result.to_dict(), before)
+
+    def test_prelayout_is_optional_and_failure_preserves_output(self):
+        from prelayout import compute_positions
+
+        with patch.dict('sys.modules', {'playwright.async_api': None}):
+            self.render(self.result())
+            with self.assertRaisesRegex(ValueError, 'pip install playwright'):
+                compute_positions('', [])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'graph.html'
+            source = Path(directory) / 'crawl.json'
+            write_json(self.result(), source)
+            output.write_text('previous graph')
+            stdout = io.StringIO()
+            with patch('sys.argv', ['site_graph.py', '--from-data-file', str(source),
+                                    '--vis-file', str(output), '--prelayout']), \
+                    patch('prelayout.compute_positions', side_effect=ValueError('layout failed')), \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    main()
+                self.assertEqual(error.exception.code, 1)
+            self.assertNotIn('Saved graph', stdout.getvalue())
+            self.assertEqual(output.read_text(), 'previous graph')
+            self.assertEqual(set(Path(directory).iterdir()), {source, output})
+            positions = {node_id: {'x': 0, 'y': 0} for node_id in self.result().graph_nodes()}
+            with patch('prelayout.compute_positions', return_value=positions), \
+                    patch('render.os.replace', side_effect=OSError('disk failure')):
+                with self.assertRaisesRegex(OSError, 'disk failure'):
+                    self.render(self.result(), prelayout=True, vis_file=str(output))
+            self.assertEqual(output.read_text(), 'previous graph')
+            self.assertEqual(set(Path(directory).iterdir()), {source, output})
+
+    def test_prelayout_validates_positions_and_closes_browser_on_failure(self):
+        try:
+            from playwright.async_api import Error
+        except ImportError:
+            self.skipTest('Playwright required for prelayout regression')
+        from prelayout import compute_positions
+
+        page = MagicMock(set_content=AsyncMock(), evaluate=AsyncMock())
+        browser = MagicMock(new_page=AsyncMock(return_value=page), close=AsyncMock())
+        with patch('playwright.async_api.async_playwright') as factory:
+            chromium = factory.return_value.__aenter__.return_value.chromium
+            chromium.launch = AsyncMock(return_value=browser)
+            for value in (None, {}, {'wrong': {'x': 0, 'y': 0}},
+                          {self.root: {'x': float('nan'), 'y': 0}},
+                          {self.root: {'x': True, 'y': 0}},
+                          {self.root: {'x': 0, 'y': 0, 'script': 'bad'}}):
+                page.evaluate.return_value = value
+                with self.subTest(positions=value), self.assertRaisesRegex(ValueError, 'invalid node positions'):
+                    compute_positions('network = new vis.Network(container, data, options);', [self.root])
+            for error in (TimeoutError(), Error('Executable does not exist')):
+                page.evaluate.side_effect = error
+                with self.subTest(error=error), self.assertRaisesRegex(ValueError, 'playwright install chromium'):
+                    compute_positions('network = new vis.Network(container, data, options);', [self.root])
+            self.assertEqual(browser.close.await_count, 8)
 
     def test_opt_in_preserves_graph_coloring_and_drawing_options(self):
         result = self.result()
