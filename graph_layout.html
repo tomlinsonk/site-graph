@@ -13,10 +13,92 @@
   }
   #loadingBar progress { flex: 1; min-width: 0; width: 0; }
   #loadingBar output { font: 18px system-ui, sans-serif; color: #000; }
+  #graph-layout { clear: both; padding: .75rem; font: 14px system-ui, sans-serif; }
+  #graph-physics-control {
+    position: absolute; top: 12px; right: 12px; z-index: 11;
+    display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+    border: 1px solid rgba(15, 23, 42, .12); border-radius: 24px;
+    background: rgba(255, 255, 255, .94); color: #334155;
+    box-shadow: 0 2px 8px rgba(15, 23, 42, .12); backdrop-filter: blur(8px);
+    font: 500 13px system-ui, sans-serif; cursor: pointer; user-select: none;
+  }
+  #graph-physics {
+    appearance: none; position: relative; width: 32px; height: 18px; margin: 0;
+    border: 0; border-radius: 12px; background: #64748b; cursor: pointer;
+  }
+  #graph-physics::before {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 14px; height: 14px; border-radius: 50%; background: #fff;
+  }
+  #graph-physics:checked { background: #0072BB; }
+  #graph-physics:checked::before { transform: translateX(14px); }
+  #graph-physics:focus-visible { outline: 2px solid #0072BB; outline-offset: 4px; }
 </style>
+<div id="graph-layout">
+  <label id="graph-physics-control" title="Pause or resume graph motion">
+    Physics <input id="graph-physics" type="checkbox" role="switch">
+  </label>
+  <button id="graph-save" type="button">Save layout</button>
+  <span>Download HTML with the current positions for faster reopening.</span>
+  <span id="graph-save-status" role="status"></span>
+</div>
 <script>
-(() => {
+document.addEventListener("DOMContentLoaded", () => {
   "use strict";
+  const pane = document.getElementById("mynetwork");
+  pane.before(document.getElementById("graph-layout"));
+  pane.append(document.getElementById("graph-physics-control"));
+  // Keep the original graph, not temporary filters or selection styles.
+  graphData.edges = structuredClone(edges.get());
+  const mergeOptions = (target, changes) => {
+    for (const [key, value] of Object.entries(changes)) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        if (!target[key] || typeof target[key] !== "object") target[key] = {};
+        mergeOptions(target[key], value);
+      } else {
+        target[key] = value;
+      }
+    }
+  };
+  const physics = document.getElementById("graph-physics");
+  physics.checked = graphData.options.physics?.enabled !== false;
+  physics.addEventListener("change", () => {
+    const changes = {physics: {enabled: physics.checked}};
+    mergeOptions(graphData.options, changes);
+    network.setOptions(changes);
+  });
+  network.on("configChange", changes => {
+    mergeOptions(graphData.options, changes);
+    physics.checked = graphData.options.physics?.enabled !== false;
+  });
+  document.getElementById("graph-save").addEventListener("click", () => {
+    const status = document.getElementById("graph-save-status");
+    try {
+      const saved = structuredClone(graphData);
+      const positions = network.getPositions(nodes.getIds());
+      saved.nodes = saved.nodes.map(node => ({...node, ...positions[node.id]}));
+      saved.options.physics = {...saved.options.physics, stabilization: {
+        ...saved.options.physics?.stabilization, enabled: false
+      }};
+      saved.options.layout = {...saved.options.layout, improvedLayout: false, hierarchical: false};
+      const documentCopy = graphDocument.cloneNode(true);
+      // Raw-text script elements need escaping even when their type is application/json.
+      documentCopy.querySelector("#graph-data").textContent = JSON.stringify(saved)
+        .replace(/&/g, "\\u0026").replace(/</g, "\\u003c").replace(/>/g, "\\u003e")
+        .replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+      const url = URL.createObjectURL(new Blob(["<!doctype html>\n" + documentCopy.outerHTML],
+        {type: "text/html;charset=utf-8"}));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "graph-layout.html";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      status.textContent = "Layout download started.";
+    } catch (error) {
+      console.error("Could not save graph layout", error);
+      status.textContent = "Could not save layout: " + error.message;
+    }
+  });
   // Start hidden: disabled physics/stabilization and empty graphs may emit no progress.
   const overlay = document.createElement("div");
   overlay.id = "loadingBar";
@@ -24,7 +106,7 @@
   overlay.innerHTML = '<div class="graph-loading-progress">' +
     '<progress max="1" value="0" aria-label="Graph layout progress"></progress>' +
     '<output>0%</output></div>';
-  document.getElementById("mynetwork").append(overlay);
+  pane.append(overlay);
   const bar = overlay.querySelector("progress");
   const label = overlay.querySelector("output");
   network.on("stabilizationProgress", event => {
@@ -36,5 +118,5 @@
   const hide = () => { overlay.hidden = true; };
   network.on("stabilizationIterationsDone", hide);
   network.on("stabilized", hide);
-})();
+});
 </script>

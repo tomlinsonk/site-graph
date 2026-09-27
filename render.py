@@ -63,7 +63,27 @@ def prepare_graph_template(net, interactive):
         .replace('\u2028', '\\u2028').replace('\u2029', '\\u2029')
     )
     template = net.templateEnv.loader.get_source(net.templateEnv, net.path)[0]
-    template = template.replace('{{options|safe}}', '{{options|script_safe|safe}}')
+    template = template.replace(
+        'function drawGraph() {',
+        'var graphDocument, graphData;\n'
+        'function drawGraph() {\n'
+        'graphData = JSON.parse(document.getElementById("graph-data").textContent);',
+    )
+    template = template.replace('{{nodes|tojson}}', 'structuredClone(graphData.nodes)')
+    template = template.replace('{{edges|tojson}}', 'graphData.edges')
+    template = template.replace('{{options|safe}}', 'structuredClone(graphData.options)')
+    template = template.replace(
+        'drawGraph();',
+        'document.addEventListener("DOMContentLoaded", () => {\n'
+        'graphDocument = document.documentElement.cloneNode(true);\n'
+        'drawGraph();\n'
+        '});',
+    )
+    template = template.replace('</body>', '''
+<script id="graph-data" type="application/json">
+{"nodes": {{nodes|tojson}}, "edges": {{edges|tojson}}, "options": {{options|script_safe|safe}}}
+</script>
+</body>''')
     # Replace PyVis's page-positioned loading CSS, markup and event handlers.
     template = template.replace(
         '{% if nodes|length > 100 and physics_enabled %}', '{% if false %}',
@@ -78,14 +98,18 @@ def prepare_graph_template(net, interactive):
 
 
 def visualize(result, args):
-    net = Network(width=f'{args.width}px', height=f'{args.height}px', directed=True)
+    net = Network(width=f'{args.width}px', height=f'{args.height}px', directed=True,
+                  cdn_resources='remote')
+    net.options.edges.smooth.enabled = False
     net.add_nodes(result.graph_nodes())
     for source, target in sorted(result.edges):
         net.add_edge(source, target, width=1)
     if args.show_buttons:
         net.show_buttons()
     elif args.options is not None:
-        net.set_options(args.options)
+        options = json.loads(args.options)
+        options.setdefault('edges', {}).setdefault('smooth', False)
+        net.set_options(json.dumps(options))
 
     aliases = {}
     if args.interactive_controls:

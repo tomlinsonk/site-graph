@@ -61,7 +61,7 @@
   <div id="graph-detail"></div>
 </section>
 <script>
-(() => {
+document.addEventListener("DOMContentLoaded", () => {
   "use strict";
   const panel = document.getElementById("graph-controls");
   document.getElementById("mynetwork").before(panel);
@@ -199,5 +199,5 @@
   get("clear").addEventListener("click", () => select(null, false));
   network.on("click", event => select(event.nodes.length ? event.nodes[0] : null, false));
   render();
-})();
+});
 </script>
