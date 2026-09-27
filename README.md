@@ -44,11 +44,8 @@ Run `python3 site_graph.py -h` for all options.
 
 ### Saving a layout
 
-The first open computes a layout. Straight edges keep this faster; the default layout stops physics after up to 1000 stabilization iterations. Explicit `--options` physics settings take precedence.
-
-Once the layout looks right, click **Save layout**. Open or publish the downloaded `graph-layout.html` to skip layout calculation next time. It includes all nodes, their current positions, and drawing settings, but not temporary filters or selections. Physics is disabled in the saved copy; you can still drag nodes, zoom, and use the exploration controls.
-
-The downloaded HTML can be moved to another directory or website. It needs internet access for CDN scripts/styles, but no accompanying `lib` directory. Redrawing a crawl with the CLI starts a fresh layout.
+Once the graph settles, click **Save layout**. Reopen or publish the downloaded `graph-layout.html` to skip layout calculation next time.
+It keeps all nodes and drawing settings, not filters or selections, and still needs internet access.
 
 ### Saved crawls
 
