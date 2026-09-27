@@ -39,17 +39,11 @@ Use `--only-404` to color only 404 errors red. Other errors are still shown on h
 Add `--interactive-controls` to search URLs, filter nodes, and highlight links to and from a selected node.
 Error filters also show the pages linking to those errors and the internal paths leading to them.
 
+Add `--prelayout` to compute the layout before saving HTML.
+Requires `python3 -m pip install playwright` and `python3 -m playwright install chromium`.
+
 Use `--show-buttons` to adjust the drawing settings in the browser. You can save the generated options to a file and load it with `--options`.
 Run `python3 site_graph.py -h` for all options.
-
-### Precomputing a layout
-
-Add `--prelayout` to compute positions during HTML generation instead of first opening.
-Install the optional browser once: `python3 -m pip install playwright` and `python3 -m playwright install chromium`.
-For example: `python3 site_graph.py --from-data-file crawl.json --prelayout`.
-It uses your layout settings and stabilization iteration limit (default: 1000), with a 120-second total timeout.
-The HTML still needs internet access for its assets. Physics stays on unless disabled in your options;
-use **Physics** to pause or resume motion.
 
 ### Saved crawls
 
@@ -72,9 +66,7 @@ python3 site_graph.py http://localhost:8080/
 - `crawler.py`: fetches pages and follows links
 - `crawl_result.py`: crawl data, JSON loading/saving, and summaries
 - `render.py`: creates the HTML graph using `graph_layout.html` and `interactive_controls.html`
-- `prelayout.py`: optional headless browser layout
 
 ## Contributing
 Run `python3 -m unittest` to run the tests. Browser tests use Chrome or Chromium.
-Prelayout browser tests also need the optional Playwright setup above.
 This code is under a MIT License. Feel free to make pull requests if there are some features you'd like included (or bugs you'd like fixed).
